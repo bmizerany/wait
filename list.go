@@ -54,10 +54,9 @@ type List[Item any] struct {
 	ready   queue.Lifo[Item] // LIFO stack of ready items
 	loads   int              // number of live items tracked by the list
 
-	// waitersMu guards waiters, pending, and testHookWaiterCanceled.
+	// waitersMu guards waiters, and testHookWaiterCanceled.
 	waitersMu sync.Mutex
 	waiters   queue.Fifo[*waiter[Item]] // FIFO queue of waiters
-	pending   queue.Fifo[*waiter[Item]] // waiters whose load has not started
 
 	chanPool sync.Pool
 
@@ -82,7 +81,6 @@ func (p *List[T]) Close() {
 
 	p.waitersMu.Lock()
 	defer p.waitersMu.Unlock()
-	p.pending = queue.Fifo[*waiter[T]]{}
 
 	// Wake all waiters
 	for {
@@ -147,7 +145,6 @@ func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
 		load: normalizeLoad(load),
 	}
 	p.waiters.Unshift(waiter)
-	p.pending.Unshift(waiter)
 
 	if ctx.Err() == nil {
 		p.startNextLoadLocked()
@@ -268,9 +265,6 @@ func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
 	p.waiters.DeleteFunc(func(queued *waiter[T]) bool {
 		return w == queued
 	})
-	p.pending.DeleteFunc(func(queued *waiter[T]) bool {
-		return w == queued
-	})
 	p.waitersMu.Unlock()
 
 	select {
@@ -291,19 +285,14 @@ func normalizeLoad[T any](load func() T) func() T {
 }
 
 func (p *List[T]) startNextLoadLocked() {
-	if !p.canLoadLocked() {
+	if p.MaxItems > 0 && p.loads >= p.MaxItems {
 		return
 	}
 
-	waiter, ok := p.pending.Front()
+	waiter, ok := p.waiters.Front()
 	if !ok {
 		return
 	}
-	p.pending.Shift()
 	p.loads++
 	go func() { p.Put(waiter.load()) }()
-}
-
-func (p *List[T]) canLoadLocked() bool {
-	return p.MaxItems == 0 || p.loads < p.MaxItems
 }
