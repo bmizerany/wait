@@ -48,4 +48,8 @@ defer pool.Put(conn)
 // use conn
 ```
 
+Call `Put` to return a reusable checked-out item. Call `Retire` instead when
+the checked-out item should never be returned and the pool should eventually
+replace it.
+
 See [package documentation](https://pkg.go.dev/blake.io/wait) for details.

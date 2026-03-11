@@ -55,6 +55,42 @@ func TestFifo(t *testing.T) {
 	}
 }
 
+func TestFifoFront(t *testing.T) {
+	var q Fifo[int]
+
+	if _, ok := q.Front(); ok {
+		t.Fatal("Front() on empty queue = true, want false")
+	}
+
+	q.Unshift(1)
+	q.Unshift(2)
+	q.Unshift(3)
+
+	if got, ok := q.Front(); !ok || got != 1 {
+		t.Fatalf("Front() = (%d, %t), want (1, true)", got, ok)
+	}
+
+	if q.Len() != 3 {
+		t.Fatalf("Len() after Front() = %d, want 3", q.Len())
+	}
+
+	if got, ok := q.Shift(); !ok || got != 1 {
+		t.Fatalf("first Shift() = (%d, %t), want (1, true)", got, ok)
+	}
+
+	if got, ok := q.Front(); !ok || got != 2 {
+		t.Fatalf("Front() after Shift() = (%d, %t), want (2, true)", got, ok)
+	}
+
+	if got, ok := q.Shift(); !ok || got != 2 {
+		t.Fatalf("second Shift() = (%d, %t), want (2, true)", got, ok)
+	}
+
+	if got, ok := q.Shift(); !ok || got != 3 {
+		t.Fatalf("third Shift() = (%d, %t), want (3, true)", got, ok)
+	}
+}
+
 func TestLifo(t *testing.T) {
 	var q Lifo[int]
 

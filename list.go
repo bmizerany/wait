@@ -10,6 +10,8 @@
 //
 // List trades some throughput for predictable latency. If you don't need
 // fairness or creation limits, a buffered channel is simpler.
+// Checked-out items return to the pool with [List.Put] or permanently leave
+// it with [List.Retire].
 package wait
 
 import (
@@ -50,17 +52,23 @@ type List[Item any] struct {
 	// readyMu guards the ready list and loads counter.
 	readyMu sync.Mutex
 	ready   queue.Lifo[Item] // LIFO stack of ready items
-	loads   int              // number of items loaded in all calls to Take
+	loads   int              // number of live items tracked by the list
 
-	// waitersMu guards waiters (and testHookWaiterCanceled).
+	// waitersMu guards waiters, pending, and testHookWaiterCanceled.
 	waitersMu sync.Mutex
-	waiters   queue.Fifo[chan Item] // FIFO queue of waiters
+	waiters   queue.Fifo[*waiter[Item]] // FIFO queue of waiters
+	pending   queue.Fifo[*waiter[Item]] // waiters whose load has not started
 
 	chanPool sync.Pool
 
 	closed atomic.Bool
 
 	testHookWaiterCanceled func(ch chan Item)
+}
+
+type waiter[T any] struct {
+	ch   chan T
+	load func() T
 }
 
 // Close closes the List. Waiting goroutines are unblocked and will
@@ -74,14 +82,15 @@ func (p *List[T]) Close() {
 
 	p.waitersMu.Lock()
 	defer p.waitersMu.Unlock()
+	p.pending = queue.Fifo[*waiter[T]]{}
 
 	// Wake all waiters
 	for {
-		ch, ok := p.waiters.Shift()
+		waiter, ok := p.waiters.Shift()
 		if !ok {
 			break
 		}
-		close(ch)
+		close(waiter.ch)
 	}
 }
 
@@ -133,14 +142,15 @@ func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
 	if ch == nil {
 		ch = make(chan T, 1)
 	}
-	p.waiters.Unshift(ch)
+	waiter := &waiter[T]{
+		ch:   ch,
+		load: normalizeLoad(load),
+	}
+	p.waiters.Unshift(waiter)
+	p.pending.Unshift(waiter)
 
-	if ctx.Err() == nil && (p.MaxItems == 0 || p.loads < p.MaxItems) {
-		p.loads++
-		if load == nil {
-			load = func() (zero T) { return }
-		}
-		go func() { p.Put(load()) }()
+	if ctx.Err() == nil {
+		p.startNextLoadLocked()
 	}
 
 	p.waitersMu.Unlock()
@@ -148,16 +158,16 @@ func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
 
 	// Wait for value or context cancellation
 	select {
-	case v, ok := <-ch:
-		p.chanPool.Put(ch)
+	case v, ok := <-waiter.ch:
+		p.chanPool.Put(waiter.ch)
 		if !ok {
 			return zero, ErrClosed
 		}
 		return v, nil
 	case <-ctx.Done():
 		err := context.Cause(ctx)
-		v, err := p.handleCancel(ch, err)
-		p.chanPool.Put(ch)
+		v, err := p.handleCancel(waiter, err)
+		p.chanPool.Put(waiter.ch)
 		return v, err
 	}
 }
@@ -183,11 +193,11 @@ func (p *List[T]) Put(v T) (accepted bool) {
 
 	maybeHandoff := func(v T) bool {
 		p.waitersMu.Lock()
-		ch, ok := p.waiters.Shift()
+		waiter, ok := p.waiters.Shift()
 		p.waitersMu.Unlock()
 		if ok {
 			select {
-			case ch <- v:
+			case waiter.ch <- v:
 			default:
 				panic("waiter: waiter channel full (this is a bug in waitlist)")
 			}
@@ -220,28 +230,80 @@ func (p *List[T]) Put(v T) (accepted bool) {
 	return true
 }
 
-// handleCancel removes the given waiter channel from the waiters list and
-// returns errUnlessMissed unless a near-miss occurred and a value is available
-// on the channel, in which case it returns that value and nil error.
-func (p *List[T]) handleCancel(ch chan T, errUnlessMissed error) (T, error) {
+// Retire permanently removes one checked-out item from the live item count.
+//
+// If the List is open and the oldest waiting goroutine has not yet had its
+// load started, Retire starts exactly one replacement load for that waiter.
+// If there are no live items to retire, Retire is a no-op.
+func (p *List[T]) Retire() {
+	p.readyMu.Lock()
+	defer p.readyMu.Unlock()
+
+	if p.loads == 0 {
+		return
+	}
+	p.loads--
+
+	p.waitersMu.Lock()
+	defer p.waitersMu.Unlock()
+
+	if p.closed.Load() {
+		return
+	}
+
+	p.startNextLoadLocked()
+}
+
+// handleCancel removes the given waiter from the waiters list and returns
+// errUnlessMissed unless a near-miss occurred and a value is available on the
+// waiter channel, in which case it returns that value and nil error.
+func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
 	var zero T
 
 	if p.testHookWaiterCanceled != nil {
-		p.testHookWaiterCanceled(ch)
+		p.testHookWaiterCanceled(w.ch)
 	}
 
 	p.waitersMu.Lock()
-	p.waiters.DeleteFunc(func(wch chan T) bool {
-		return ch == wch
+	p.waiters.DeleteFunc(func(queued *waiter[T]) bool {
+		return w == queued
+	})
+	p.pending.DeleteFunc(func(queued *waiter[T]) bool {
+		return w == queued
 	})
 	p.waitersMu.Unlock()
 
 	select {
-	case v := <-ch:
+	case v := <-w.ch:
 		// Near miss: a value arrived just as we were canceling.
 		// Return it instead of the error.
 		return v, nil
 	default:
 	}
 	return zero, errUnlessMissed
+}
+
+func normalizeLoad[T any](load func() T) func() T {
+	if load != nil {
+		return load
+	}
+	return func() (zero T) { return }
+}
+
+func (p *List[T]) startNextLoadLocked() {
+	if !p.canLoadLocked() {
+		return
+	}
+
+	waiter, ok := p.pending.Front()
+	if !ok {
+		return
+	}
+	p.pending.Shift()
+	p.loads++
+	go func() { p.Put(waiter.load()) }()
+}
+
+func (p *List[T]) canLoadLocked() bool {
+	return p.MaxItems == 0 || p.loads < p.MaxItems
 }

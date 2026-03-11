@@ -7,6 +7,14 @@ type Fifo[E any] struct {
 	a []E
 }
 
+func (q *Fifo[E]) Front() (v E, ok bool) {
+	var zero E
+	if len(q.a) == 0 {
+		return zero, false
+	}
+	return q.a[0], true
+}
+
 func (q *Fifo[E]) Unshift(v E) {
 	q.a = append(q.a, v)
 }
