@@ -46,7 +46,7 @@ type List[Item any] struct {
 
 	// New creates an item when the ready queue is empty and MaxItems allows.
 	// If nil, New returns the zero value of Item.
-	New func(context.Context) Item
+	New func() Item
 
 	// MaxWaiters is the maximum number of goroutines that can wait.
 	// Take returns ErrMaxWaiters when this limit is reached.
@@ -70,7 +70,6 @@ type List[Item any] struct {
 }
 
 type waiter[T any] struct {
-	ctx     context.Context
 	ch      chan T
 	loading bool
 }
@@ -146,8 +145,7 @@ func (p *List[T]) Take(ctx context.Context) (T, error) {
 		ch = make(chan T, 1)
 	}
 	waiter := &waiter[T]{
-		ctx: ctx,
-		ch:  ch,
+		ch: ch,
 	}
 	p.waiters.Unshift(waiter)
 
@@ -235,7 +233,7 @@ func (p *List[T]) Put(v T) (accepted bool) {
 // Retire permanently removes one checked-out item from the live item count.
 //
 // If the List is open and there is a waiting goroutine, Retire starts exactly
-// one replacement load using [List.New] with the oldest waiter's context.
+// one replacement load using [List.New].
 // If there are no live items to retire, Retire is a no-op.
 func (p *List[T]) Retire() {
 	p.readyMu.Lock()
@@ -282,11 +280,11 @@ func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
 	return zero, errUnlessMissed
 }
 
-func normalizeNew[T any](new func(context.Context) T) func(context.Context) T {
+func normalizeNew[T any](new func() T) func() T {
 	if new != nil {
 		return new
 	}
-	return func(context.Context) (zero T) { return }
+	return func() (zero T) { return }
 }
 
 func (p *List[T]) startNextLoadLocked() {
@@ -301,7 +299,7 @@ func (p *List[T]) startNextLoadLocked() {
 	waiter.loading = true
 	p.loads++
 	newItem := normalizeNew(p.New)
-	go func() { p.Put(newItem(waiter.ctx)) }()
+	go func() { p.Put(newItem()) }()
 }
 
 func (p *List[T]) canLoadLocked() bool {

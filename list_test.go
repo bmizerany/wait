@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-type listTestContextKey struct{}
-
 func TestList(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := &List[int]{
@@ -19,7 +17,7 @@ func TestList(t *testing.T) {
 		}
 
 		loads := new(atomic.Int64)
-		p.New = func(context.Context) int {
+		p.New = func() int {
 			return int(loads.Add(1) - 1)
 		}
 		checkTake := func(want int) {
@@ -95,7 +93,7 @@ func TestListTakeContextCancel(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 10,
-				New:        func(context.Context) int { panic("should not call load func") },
+				New:        func() int { panic("should not call load func") },
 			}
 
 			ctx, cancel := context.WithCancel(t.Context())
@@ -112,7 +110,7 @@ func TestListTakeContextCancel(t *testing.T) {
 		p := &List[int]{
 			MaxItems:   1,
 			MaxWaiters: 10,
-			New:        func(context.Context) int { panic("should not call load func") },
+			New:        func() int { panic("should not call load func") },
 		}
 
 		// Put an item so it's ready
@@ -136,7 +134,7 @@ func TestListTakeContextCancel(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 10,
-				New:        func(context.Context) int { return 42 },
+				New:        func() int { return 42 },
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
@@ -172,7 +170,7 @@ func BenchmarkList(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			p := &List[int]{
 				MaxItems: 10,
-				New:      func(context.Context) int { return 42 },
+				New:      func() int { return 42 },
 			}
 			for pb.Next() {
 				func() {
@@ -198,7 +196,7 @@ func BenchmarkList(b *testing.B) {
 		p := &List[int]{
 			MaxItems:   10,
 			MaxWaiters: 100,
-			New:        func(context.Context) int { return 0 },
+			New:        func() int { return 0 },
 		}
 
 		b.RunParallel(func(pb *testing.PB) {
@@ -368,7 +366,7 @@ func TestTakeNearMiss(t *testing.T) {
 		p := &List[int]{
 			MaxItems:   1,
 			MaxWaiters: 10,
-			New:        func(context.Context) int { return 42 },
+			New:        func() int { return 42 },
 
 			// induce near miss
 			testHookWaiterCanceled: func(ch chan int) { ch <- 42 },
@@ -412,7 +410,7 @@ func TestListRetire(t *testing.T) {
 			p := &List[int]{MaxItems: 1}
 
 			var loads atomic.Int64
-			p.New = func(context.Context) int {
+			p.New = func() int {
 				return int(loads.Add(1))
 			}
 			got, err := p.Take(t.Context())
@@ -450,7 +448,7 @@ func TestListRetire(t *testing.T) {
 				t.Fatal("initial Take():", err)
 			}
 
-			p.New = func(context.Context) int {
+			p.New = func() int {
 				started.Add(1)
 				return 42
 			}
@@ -500,21 +498,24 @@ func TestListRetire(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 2,
-				New: func(ctx context.Context) int {
-					newCalls.Add(1)
-					return ctx.Value(listTestContextKey{}).(int)
+				New: func() int {
+					switch newCalls.Add(1) {
+					case 1:
+						return 1
+					default:
+						return 101
+					}
 				},
 			}
 
-			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 1))
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
 			oldestResult := make(chan int, 1)
 			go func() {
-				ctx := context.WithValue(t.Context(), listTestContextKey{}, 101)
-				v, err := p.Take(ctx)
+				v, err := p.Take(t.Context())
 				if err != nil {
 					t.Errorf("oldest waiter Take(): %v", err)
 					return
@@ -525,8 +526,7 @@ func TestListRetire(t *testing.T) {
 
 			newerErr := make(chan error, 1)
 			go func() {
-				ctx := context.WithValue(t.Context(), listTestContextKey{}, 202)
-				_, err := p.Take(ctx)
+				_, err := p.Take(t.Context())
 				newerErr <- err
 			}()
 			synctest.Wait()
@@ -552,15 +552,17 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("preserves FIFO service order under multiple waiters", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
+			var nextNew atomic.Int64
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 3,
-				New: func(ctx context.Context) int {
-					return ctx.Value(listTestContextKey{}).(int)
+				New: func() int {
+					call := nextNew.Add(1)
+					return max(0, int(call-1))
 				},
 			}
 
-			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 0))
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
@@ -569,8 +571,7 @@ func TestListRetire(t *testing.T) {
 			for want := 1; want <= 3; want++ {
 				want := want
 				go func() {
-					ctx := context.WithValue(t.Context(), listTestContextKey{}, want)
-					got, err := p.Take(ctx)
+					got, err := p.Take(t.Context())
 					if err != nil {
 						t.Errorf("waiter %d Take(): %v", want, err)
 						return
@@ -608,7 +609,7 @@ func TestListRetire(t *testing.T) {
 				t.Fatal("initial Take():", err)
 			}
 
-			p.New = func(context.Context) int {
+			p.New = func() int {
 				started.Add(1)
 				<-release
 				return 2
@@ -660,7 +661,7 @@ func TestListRetire(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 1,
-				New: func(context.Context) int {
+				New: func() int {
 					started.Add(1)
 					return 1
 				},
@@ -703,19 +704,20 @@ func TestListRetire(t *testing.T) {
 			release := make(chan struct{})
 			var newCalls atomic.Int64
 			p := &List[int]{MaxItems: 1, MaxWaiters: 2}
+			p.New = func() int {
+				if newCalls.Add(1) == 1 {
+					return 1
+				}
+				<-release
+				return 11
+			}
 
-			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 1))
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
-			p.New = func(ctx context.Context) int {
-				newCalls.Add(1)
-				<-release
-				return ctx.Value(listTestContextKey{}).(int)
-			}
-
-			waiter1Ctx, cancelWaiter1 := context.WithCancel(context.WithValue(t.Context(), listTestContextKey{}, 11))
+			waiter1Ctx, cancelWaiter1 := context.WithCancel(t.Context())
 			defer cancelWaiter1()
 
 			waiter1Err := make(chan error, 1)
@@ -725,23 +727,22 @@ func TestListRetire(t *testing.T) {
 			}()
 			synctest.Wait()
 
-			waiter2Result := make(chan int, 1)
+			type waiter2ResultEvent struct {
+				v   int
+				err error
+			}
+			waiter2Events := make(chan waiter2ResultEvent, 1)
 			go func() {
-				ctx := context.WithValue(t.Context(), listTestContextKey{}, 22)
-				v, err := p.Take(ctx)
-				if err != nil {
-					t.Errorf("waiter 2 Take(): %v", err)
-					return
-				}
-				waiter2Result <- v
+				v, err := p.Take(t.Context())
+				waiter2Events <- waiter2ResultEvent{v: v, err: err}
 			}()
 			synctest.Wait()
 
 			p.Retire()
 			synctest.Wait()
 
-			if got := newCalls.Load(); got != 1 {
-				t.Fatalf("New calls before handoff = %d, want 1", got)
+			if got := newCalls.Load(); got != 2 {
+				t.Fatalf("New calls before handoff = %d, want 2", got)
 			}
 
 			cancelWaiter1()
@@ -753,8 +754,10 @@ func TestListRetire(t *testing.T) {
 			if err := <-waiter1Err; !errors.Is(err, context.Canceled) {
 				t.Fatalf("waiter 1 err = %v, want context.Canceled", err)
 			}
-			if got := <-waiter2Result; got != 11 {
-				t.Fatalf("waiter 2 got %d, want 11", got)
+			if got := <-waiter2Events; got.err != nil {
+				t.Fatalf("waiter 2 Take(): %v", got.err)
+			} else if got.v != 11 {
+				t.Fatalf("waiter 2 got %d, want 11", got.v)
 			}
 		})
 	})

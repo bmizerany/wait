@@ -34,7 +34,7 @@ Don't use this when:
 pool := &wait.List[*sql.Conn]{
     MaxItems:   10,  // never create more than 10 connections
     MaxWaiters: 100, // reject requests if queue is too long
-    New: func(context.Context) *sql.Conn {
+    New: func() *sql.Conn {
         // only called if we haven't hit MaxItems
         return openConnection()
     },
