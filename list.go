@@ -70,8 +70,9 @@ type List[Item any] struct {
 }
 
 type waiter[T any] struct {
-	ctx context.Context
-	ch  chan T
+	ctx     context.Context
+	ch      chan T
+	loading bool
 }
 
 // Close closes the List. Waiting goroutines are unblocked and will
@@ -289,15 +290,36 @@ func normalizeNew[T any](new func(context.Context) T) func(context.Context) T {
 }
 
 func (p *List[T]) startNextLoadLocked() {
-	if p.MaxItems > 0 && p.loads >= p.MaxItems {
+	if !p.canLoadLocked() {
 		return
 	}
 
-	waiter, ok := p.waiters.Front()
+	waiter, ok := p.nextWaiterToLoadLocked()
 	if !ok {
 		return
 	}
+	waiter.loading = true
 	p.loads++
 	newItem := normalizeNew(p.New)
 	go func() { p.Put(newItem(waiter.ctx)) }()
+}
+
+func (p *List[T]) canLoadLocked() bool {
+	return p.MaxItems == 0 || p.loads < p.MaxItems
+}
+
+func (p *List[T]) nextWaiterToLoadLocked() (*waiter[T], bool) {
+	n := p.waiters.Len()
+	var candidate *waiter[T]
+	for range n {
+		waiter, ok := p.waiters.Shift()
+		if !ok {
+			break
+		}
+		p.waiters.Unshift(waiter)
+		if candidate == nil && !waiter.loading {
+			candidate = waiter
+		}
+	}
+	return candidate, candidate != nil
 }
