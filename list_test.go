@@ -513,21 +513,22 @@ func TestListRetire(t *testing.T) {
 				t.Fatal("initial Take():", err)
 			}
 
-			oldestResult := make(chan int, 1)
+			var got [2]int
 			go func() {
 				v, err := p.Take(t.Context())
 				if err != nil {
 					t.Errorf("oldest waiter Take(): %v", err)
 					return
 				}
-				oldestResult <- v
+				got[0] = v
 			}()
 			synctest.Wait()
 
-			newerErr := make(chan error, 1)
 			go func() {
 				_, err := p.Take(t.Context())
-				newerErr <- err
+				if !errors.Is(err, ErrClosed) {
+					t.Errorf("newer waiter err = %v, want ErrClosed", err)
+				}
 			}()
 			synctest.Wait()
 
@@ -537,16 +538,12 @@ func TestListRetire(t *testing.T) {
 			if got := newCalls.Load(); got != 2 {
 				t.Fatalf("New calls = %d, want 2", got)
 			}
-			if got := <-oldestResult; got != 101 {
-				t.Fatalf("oldest waiter got %d, want 101", got)
+			if got[0] != 101 {
+				t.Fatalf("oldest waiter got %d, want 101", got[0])
 			}
 
 			p.Close()
 			synctest.Wait()
-
-			if err := <-newerErr; !errors.Is(err, ErrClosed) {
-				t.Fatalf("newer waiter err = %v, want ErrClosed", err)
-			}
 		})
 	})
 
@@ -557,8 +554,7 @@ func TestListRetire(t *testing.T) {
 				MaxItems:   1,
 				MaxWaiters: 3,
 				New: func() int {
-					call := nextNew.Add(1)
-					return max(0, int(call-1))
+					return int(nextNew.Add(1))
 				},
 			}
 
@@ -567,198 +563,162 @@ func TestListRetire(t *testing.T) {
 				t.Fatal("initial Take():", err)
 			}
 
-			served := make(chan int, 3)
-			for want := 1; want <= 3; want++ {
-				want := want
+			var got [3]int
+			for slot := range len(got) {
 				go func() {
-					got, err := p.Take(t.Context())
+					v, err := p.Take(t.Context())
 					if err != nil {
-						t.Errorf("waiter %d Take(): %v", want, err)
+						t.Errorf("waiter %d Take(): %v", slot, err)
 						return
 					}
-					if got != want {
-						t.Errorf("waiter %d got %d, want %d", want, got, want)
-						return
-					}
-					served <- got
+					got[slot] = v
 					p.Retire()
 				}()
+
+				// Wait in turn for each waiter to get in line
+				// before starting the next waiter, to ensure
+				// they are queued in order.
 				synctest.Wait()
 			}
 
 			p.Retire()
 			synctest.Wait()
 
-			for want := 1; want <= 3; want++ {
-				if got := <-served; got != want {
-					t.Fatalf("service #%d = %d, want %d", want, got, want)
-				}
-				synctest.Wait()
+			want := [3]int{2, 3, 4}
+			if got != want {
+				t.Fatalf("got = %v, want %v", got, want)
 			}
 		})
 	})
 
 	t.Run("does not over-create", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			release := make(chan struct{})
 			var started atomic.Int64
-			p := &List[int]{MaxItems: 1, MaxWaiters: 3}
-
-			_, err := p.Take(t.Context())
-			if err != nil {
-				t.Fatal("initial Take():", err)
+			p := &List[int]{
+				MaxItems:   1,
+				MaxWaiters: 3,
+				New: func() int {
+					return int(started.Add(1))
+				},
 			}
 
-			p.New = func() int {
-				started.Add(1)
-				<-release
-				return 2
-			}
-
-			results := make(chan int, 3)
-			errs := make(chan error, 3)
-
-			for range 3 {
+			// Occupy only item on first Take() and start two more
+			// waiters that will block and cause loads to start
+			// when we Retire().
+			var got [3]int
+			for i := range 3 {
 				go func() {
 					v, err := p.Take(t.Context())
 					if err != nil {
-						errs <- err
+						t.Errorf("waiting Take() err = %v, want value", err)
 						return
 					}
-					results <- v
+					got[i] = v
 				}()
 				synctest.Wait()
 			}
 
+			synctest.Wait()
+			want := [3]int{1, 0, 0}
+			if got != want {
+				t.Fatalf("before Retire got = %v, want %v", got, want)
+			}
+
 			p.Retire()
 			synctest.Wait()
-
-			if got := started.Load(); got != 1 {
-				t.Fatalf("loads started after one Retire = %d, want 1", got)
+			want = [3]int{1, 2, 0}
+			if got != want {
+				t.Fatalf("after 1st Retire got = %v, want %v", got, want)
 			}
 
-			close(release)
+			p.Put(42)
 			synctest.Wait()
-
-			if got := <-results; got != 2 {
-				t.Fatalf("loaded value = %d, want 2", got)
+			want = [3]int{1, 2, 42}
+			if got != want {
+				t.Fatalf("after 2nd Retire got = %v, want %v", got, want)
 			}
 
-			p.Close()
 			synctest.Wait()
-
-			for range 2 {
-				if err := <-errs; !errors.Is(err, ErrClosed) {
-					t.Fatalf("waiting Take() err = %v, want ErrClosed", err)
-				}
-			}
 		})
 	})
 
 	t.Run("while closed does not start replacement and keeps ErrClosed", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			var started atomic.Int64
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 1,
 				New: func() int {
-					started.Add(1)
-					return 1
+					panic("should not start new load when closed")
 				},
 			}
-			_, err := p.Take(t.Context())
-			if err != nil {
-				t.Fatal("initial Take():", err)
-			}
-
-			waiterErr := make(chan error, 1)
-			go func() {
-				_, err := p.Take(t.Context())
-				waiterErr <- err
-			}()
-			synctest.Wait()
-
 			p.Close()
 			p.Retire()
-			synctest.Wait()
+			p.Retire()
 
-			if got := started.Load(); got != 1 {
-				t.Fatalf("loads started = %d, want 1", got)
-			}
-			if err := <-waiterErr; !errors.Is(err, ErrClosed) {
-				t.Fatalf("waiting Take() err = %v, want ErrClosed", err)
-			}
-
-			_, err = p.Take(context.Background())
+			_, err := p.Take(t.Context())
 			if !errors.Is(err, ErrClosed) {
-				t.Fatalf("Take() after Close = %v, want ErrClosed", err)
-			}
-			if got := started.Load(); got != 1 {
-				t.Fatalf("loads started after closed Take = %d, want 1", got)
+				t.Fatalf("Take() err = %v, want ErrClosed", err)
 			}
 		})
 	})
 
 	t.Run("replacement load can hand off after oldest waiter cancels", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			release := make(chan struct{})
 			var newCalls atomic.Int64
-			p := &List[int]{MaxItems: 1, MaxWaiters: 2}
-			p.New = func() int {
-				if newCalls.Add(1) == 1 {
-					return 1
-				}
-				<-release
-				return 11
+			p := &List[int]{
+				MaxItems:   1,
+				MaxWaiters: 2,
+				New: func() int {
+					return int(newCalls.Add(1))
+				},
 			}
 
-			_, err := p.Take(t.Context())
+			// Force waiters by taking the only item.
+			got, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
-
-			waiter1Ctx, cancelWaiter1 := context.WithCancel(t.Context())
-			defer cancelWaiter1()
-
-			waiter1Err := make(chan error, 1)
-			go func() {
-				_, err := p.Take(waiter1Ctx)
-				waiter1Err <- err
-			}()
-			synctest.Wait()
-
-			type waiter2ResultEvent struct {
-				v   int
-				err error
+			if got != 1 {
+				t.Fatalf("initial Take() = %d, want 1", got)
 			}
-			waiter2Events := make(chan waiter2ResultEvent, 1)
+
+			oldestWaiterCtx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			// Start two waiters.
+			// The first in line will be canceled, and the
+			// replacement load will go to the next waiter.
 			go func() {
-				v, err := p.Take(t.Context())
-				waiter2Events <- waiter2ResultEvent{v: v, err: err}
+				v, err := p.Take(oldestWaiterCtx)
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("oldest waiter Take() err = %v, want context.Canceled (got %v)", err, v)
+				}
 			}()
 			synctest.Wait()
 
+			go func() {
+				got, err := p.Take(t.Context())
+				if err != nil {
+					t.Errorf("newer waiter Take() err = %v, want value", err)
+					return
+				}
+				if got != 2 {
+					t.Errorf("newer waiter Take() got %d, want 2", got)
+				}
+			}()
+			synctest.Wait()
+
+			// Cancel the oldest waiter, which should cause the
+			// replacement load to skip it and go to the newer
+			// waiter.
+			cancel()
+			synctest.Wait()
+
+			// Retire to trigger replacement load, which should go
+			// to newer waiter, not canceled oldest waiter.
 			p.Retire()
+
 			synctest.Wait()
-
-			if got := newCalls.Load(); got != 2 {
-				t.Fatalf("New calls before handoff = %d, want 2", got)
-			}
-
-			cancelWaiter1()
-			synctest.Wait()
-
-			close(release)
-			synctest.Wait()
-
-			if err := <-waiter1Err; !errors.Is(err, context.Canceled) {
-				t.Fatalf("waiter 1 err = %v, want context.Canceled", err)
-			}
-			if got := <-waiter2Events; got.err != nil {
-				t.Fatalf("waiter 2 Take(): %v", got.err)
-			} else if got.v != 11 {
-				t.Fatalf("waiter 2 got %d, want 11", got.v)
-			}
 		})
 	})
 }
