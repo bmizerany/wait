@@ -294,8 +294,8 @@ func (p *List[T]) startNextLoadLocked() {
 		return
 	}
 
-	waiter, ok := p.nextWaiterToLoadLocked()
-	if !ok {
+	waiter := p.nextWaiterToLoadLocked()
+	if waiter == nil {
 		return
 	}
 	waiter.loading = true
@@ -308,18 +308,13 @@ func (p *List[T]) canLoadLocked() bool {
 	return p.MaxItems == 0 || p.loads < p.MaxItems
 }
 
-func (p *List[T]) nextWaiterToLoadLocked() (*waiter[T], bool) {
-	n := p.waiters.Len()
-	var candidate *waiter[T]
-	for range n {
-		waiter, ok := p.waiters.Shift()
-		if !ok {
-			break
-		}
-		p.waiters.Unshift(waiter)
-		if candidate == nil && !waiter.loading {
-			candidate = waiter
+// nextWaiterToLoadLocked returns the next waiter that is not already loading
+// an item, or nil if none.
+func (p *List[T]) nextWaiterToLoadLocked() *waiter[T] {
+	for waiter := range p.waiters.Values() {
+		if !waiter.loading {
+			return waiter
 		}
 	}
-	return candidate, candidate != nil
+	return nil
 }

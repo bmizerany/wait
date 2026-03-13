@@ -1,7 +1,10 @@
 // Package queue implements FIFO and LIFO queues.
 package queue
 
-import "slices"
+import (
+	"iter"
+	"slices"
+)
 
 type Fifo[E any] struct {
 	a []E
@@ -35,6 +38,10 @@ func (q *Fifo[E]) DeleteFunc(f func(E) bool) {
 
 func (q *Fifo[E]) Len() int {
 	return len(q.a)
+}
+
+func (q *Fifo[E]) Values() iter.Seq[E] {
+	return slices.Values(q.a)
 }
 
 type Lifo[E any] struct {
