@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+type listTestContextKey struct{}
+
 func TestList(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := &List[int]{
@@ -17,11 +19,12 @@ func TestList(t *testing.T) {
 		}
 
 		loads := new(atomic.Int64)
+		p.New = func(context.Context) int {
+			return int(loads.Add(1) - 1)
+		}
 		checkTake := func(want int) {
 			t.Helper()
-			got, err := p.Take(t.Context(), func() int {
-				return int(loads.Add(1) - 1)
-			})
+			got, err := p.Take(t.Context())
 			if err != nil {
 				if want < 0 {
 					if !errors.Is(err, ErrMaxWaiters) {
@@ -87,21 +90,18 @@ func TestList(t *testing.T) {
 }
 
 func TestListTakeContextCancel(t *testing.T) {
-	// load funcs for testing
-	shouldNotCall := func() int { panic("should not call load func") }
-	fourtyTwo := func() int { return 42 }
-
 	t.Run("early cancel", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 10,
+				New:        func(context.Context) int { panic("should not call load func") },
 			}
 
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 
-			_, err := p.Take(ctx, shouldNotCall)
+			_, err := p.Take(ctx)
 			if !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want context.Canceled", err)
 			}
@@ -112,6 +112,7 @@ func TestListTakeContextCancel(t *testing.T) {
 		p := &List[int]{
 			MaxItems:   1,
 			MaxWaiters: 10,
+			New:        func(context.Context) int { panic("should not call load func") },
 		}
 
 		// Put an item so it's ready
@@ -121,7 +122,7 @@ func TestListTakeContextCancel(t *testing.T) {
 		cancel()
 
 		// Should get the ready item even though context is canceled
-		v, err := p.Take(ctx, shouldNotCall)
+		v, err := p.Take(ctx)
 		if err != nil {
 			t.Errorf("Take with canceled ctx but ready item: err = %v, want nil", err)
 		}
@@ -135,19 +136,20 @@ func TestListTakeContextCancel(t *testing.T) {
 			p := &List[int]{
 				MaxItems:   1,
 				MaxWaiters: 10,
+				New:        func(context.Context) int { return 42 },
 			}
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 
 			// Drain to force waiters to durably block.
-			_, err := p.Take(ctx, fourtyTwo)
+			_, err := p.Take(ctx)
 			if err != nil {
 				t.Fatal("draining:", err)
 			}
 
 			// 1. waiter starts waiting
 			go func() {
-				got, err := p.Take(ctx, shouldNotCall)
+				got, err := p.Take(ctx)
 				if !errors.Is(err, context.Canceled) {
 					t.Errorf("waiting cancel: err = %v, want context.Canceled (got = %v)", got, err)
 				}
@@ -168,10 +170,13 @@ func TestListTakeContextCancel(t *testing.T) {
 func BenchmarkList(b *testing.B) {
 	b.Run("uncontended", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
-			p := &List[int]{MaxItems: 10}
+			p := &List[int]{
+				MaxItems: 10,
+				New:      func(context.Context) int { return 42 },
+			}
 			for pb.Next() {
 				func() {
-					v, err := p.Take(context.Background(), func() int { return 42 })
+					v, err := p.Take(context.Background())
 					if err != nil {
 						b.Fatal("Take:", err)
 					}
@@ -193,13 +198,14 @@ func BenchmarkList(b *testing.B) {
 		p := &List[int]{
 			MaxItems:   10,
 			MaxWaiters: 100,
+			New:        func(context.Context) int { return 0 },
 		}
 
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
 				func() {
 					ttt := time.Now()
-					h, err := p.Take(context.Background(), nil)
+					h, err := p.Take(context.Background())
 					if err != nil {
 						b.Fatal("Take:", err)
 					}
@@ -252,7 +258,7 @@ func TestWaitListClose(t *testing.T) {
 				MaxWaiters: 3,
 			}
 
-			_, err := p.Take(t.Context(), nil)
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("Initial Take():", err)
 			}
@@ -262,7 +268,7 @@ func TestWaitListClose(t *testing.T) {
 				inflight.Add(1)
 				go func() {
 					defer inflight.Add(-1)
-					_, err := p.Take(t.Context(), nil)
+					_, err := p.Take(t.Context())
 					if !errors.Is(err, ErrClosed) {
 						t.Errorf("Take() err = %v, want ErrClosed", err)
 					}
@@ -296,7 +302,7 @@ func TestWaitListClose(t *testing.T) {
 
 			p.Close()
 
-			_, err := p.Take(t.Context(), nil)
+			_, err := p.Take(t.Context())
 			if !errors.Is(err, ErrClosed) {
 				t.Errorf("Take() err = %v, want ErrClosed", err)
 			}
@@ -317,7 +323,7 @@ func TestWaitListClose(t *testing.T) {
 		// Should still be able to Take all ready items
 		seen := make(map[int]bool)
 		for i := 0; i < 5; i++ {
-			v, err := p.Take(context.Background(), nil)
+			v, err := p.Take(context.Background())
 			if err != nil {
 				t.Fatalf("Take after close (item %d): got err %v, want nil", i, err)
 			}
@@ -332,7 +338,7 @@ func TestWaitListClose(t *testing.T) {
 		}
 
 		// Now that all ready items are drained, should get ErrClosed
-		_, err := p.Take(context.Background(), nil)
+		_, err := p.Take(context.Background())
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("Take after draining: err = %v, want ErrClosed", err)
 		}
@@ -347,7 +353,7 @@ func TestWaitListClose(t *testing.T) {
 		p.Close()
 
 		// Should still return ErrClosed
-		_, err := p.Take(context.Background(), nil)
+		_, err := p.Take(context.Background())
 		if !errors.Is(err, ErrClosed) {
 			t.Errorf("Take() err = %v, want ErrClosed", err)
 		}
@@ -358,13 +364,11 @@ func TestWaitListClose(t *testing.T) {
 // just as the context is being canceled. This test uses the internal
 // testHookWaiterCanceled field to reliably induce the race condition.
 func TestTakeNearMiss(t *testing.T) {
-	shouldNotCall := func() int { panic("should not call load func") }
-	fourtyTwo := func() int { return 42 }
-
 	synctest.Test(t, func(t *testing.T) {
 		p := &List[int]{
 			MaxItems:   1,
 			MaxWaiters: 10,
+			New:        func(context.Context) int { return 42 },
 
 			// induce near miss
 			testHookWaiterCanceled: func(ch chan int) { ch <- 42 },
@@ -374,14 +378,14 @@ func TestTakeNearMiss(t *testing.T) {
 		defer cancel()
 
 		// Drain to force waiters to durably block.
-		_, err := p.Take(ctx, fourtyTwo)
+		_, err := p.Take(ctx)
 		if err != nil {
 			t.Fatal("draining:", err)
 		}
 
 		// 1. waiter starts waiting
 		go func() {
-			got, err := p.Take(ctx, shouldNotCall)
+			got, err := p.Take(ctx)
 			if err != nil {
 				t.Errorf("near miss recovery: %v", err)
 			}
@@ -408,9 +412,10 @@ func TestListRetire(t *testing.T) {
 			p := &List[int]{MaxItems: 1}
 
 			var loads atomic.Int64
-			got, err := p.Take(t.Context(), func() int {
+			p.New = func(context.Context) int {
 				return int(loads.Add(1))
-			})
+			}
+			got, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
@@ -420,9 +425,7 @@ func TestListRetire(t *testing.T) {
 
 			p.Retire()
 
-			got, err = p.Take(t.Context(), func() int {
-				return int(loads.Add(1))
-			})
+			got, err = p.Take(t.Context())
 			if err != nil {
 				t.Fatal("replacement Take():", err)
 			}
@@ -434,6 +437,7 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("with blocked waiter starts one background load immediately", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
+			var started atomic.Int64
 			p := &List[int]{MaxItems: 1}
 			defer func() {
 				p.Close()
@@ -441,18 +445,19 @@ func TestListRetire(t *testing.T) {
 			}()
 
 			// occupy the only item so the next Take() will block
-			_, err := p.Take(t.Context(), nil)
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
+			p.New = func(context.Context) int {
+				started.Add(1)
+				return 42
+			}
+
 			// start a waiter that will block until Retire() and count loads
-			var started atomic.Int64
 			go func() {
-				v, err := p.Take(t.Context(), func() int {
-					started.Add(1)
-					return 42
-				})
+				v, err := p.Take(t.Context())
 				if err != nil {
 					t.Errorf("waiting Take(): %v", err)
 					return
@@ -468,7 +473,7 @@ func TestListRetire(t *testing.T) {
 			// We will check that their loads never start.
 			for range 2 {
 				go func() {
-					_, err := p.Take(t.Context(), func() int { return 999 })
+					_, err := p.Take(t.Context())
 					if !errors.Is(err, ErrClosed) {
 						t.Errorf("expected unblock due to closing, got err = %v", err)
 					}
@@ -491,20 +496,25 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("uses oldest queued waiter's load", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			p := &List[int]{MaxItems: 1, MaxWaiters: 2}
+			var newCalls atomic.Int64
+			p := &List[int]{
+				MaxItems:   1,
+				MaxWaiters: 2,
+				New: func(ctx context.Context) int {
+					newCalls.Add(1)
+					return ctx.Value(listTestContextKey{}).(int)
+				},
+			}
 
-			_, err := p.Take(t.Context(), func() int { return 1 })
+			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 1))
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
-			var oldestLoads atomic.Int64
 			oldestResult := make(chan int, 1)
 			go func() {
-				v, err := p.Take(t.Context(), func() int {
-					oldestLoads.Add(1)
-					return 101
-				})
+				ctx := context.WithValue(t.Context(), listTestContextKey{}, 101)
+				v, err := p.Take(ctx)
 				if err != nil {
 					t.Errorf("oldest waiter Take(): %v", err)
 					return
@@ -513,13 +523,10 @@ func TestListRetire(t *testing.T) {
 			}()
 			synctest.Wait()
 
-			var newerLoads atomic.Int64
 			newerErr := make(chan error, 1)
 			go func() {
-				_, err := p.Take(t.Context(), func() int {
-					newerLoads.Add(1)
-					return 202
-				})
+				ctx := context.WithValue(t.Context(), listTestContextKey{}, 202)
+				_, err := p.Take(ctx)
 				newerErr <- err
 			}()
 			synctest.Wait()
@@ -527,11 +534,8 @@ func TestListRetire(t *testing.T) {
 			p.Retire()
 			synctest.Wait()
 
-			if got := oldestLoads.Load(); got != 1 {
-				t.Fatalf("oldest waiter loads = %d, want 1", got)
-			}
-			if got := newerLoads.Load(); got != 0 {
-				t.Fatalf("newer waiter loads = %d, want 0", got)
+			if got := newCalls.Load(); got != 2 {
+				t.Fatalf("New calls = %d, want 2", got)
 			}
 			if got := <-oldestResult; got != 101 {
 				t.Fatalf("oldest waiter got %d, want 101", got)
@@ -548,9 +552,15 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("preserves FIFO service order under multiple waiters", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			p := &List[int]{MaxItems: 1, MaxWaiters: 3}
+			p := &List[int]{
+				MaxItems:   1,
+				MaxWaiters: 3,
+				New: func(ctx context.Context) int {
+					return ctx.Value(listTestContextKey{}).(int)
+				},
+			}
 
-			_, err := p.Take(t.Context(), func() int { return 0 })
+			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 0))
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
@@ -559,7 +569,8 @@ func TestListRetire(t *testing.T) {
 			for want := 1; want <= 3; want++ {
 				want := want
 				go func() {
-					got, err := p.Take(t.Context(), func() int { return want })
+					ctx := context.WithValue(t.Context(), listTestContextKey{}, want)
+					got, err := p.Take(ctx)
 					if err != nil {
 						t.Errorf("waiter %d Take(): %v", want, err)
 						return
@@ -588,25 +599,27 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("does not over-create", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
+			release := make(chan struct{})
+			var started atomic.Int64
 			p := &List[int]{MaxItems: 1, MaxWaiters: 3}
 
-			_, err := p.Take(t.Context(), func() int { return 1 })
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
-			release := make(chan struct{})
-			var started atomic.Int64
+			p.New = func(context.Context) int {
+				started.Add(1)
+				<-release
+				return 2
+			}
+
 			results := make(chan int, 3)
 			errs := make(chan error, 3)
 
 			for range 3 {
 				go func() {
-					v, err := p.Take(t.Context(), func() int {
-						started.Add(1)
-						<-release
-						return 2
-					})
+					v, err := p.Take(t.Context())
 					if err != nil {
 						errs <- err
 						return
@@ -643,23 +656,23 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("while closed does not start replacement and keeps ErrClosed", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			p := &List[int]{MaxItems: 1, MaxWaiters: 1}
-
 			var started atomic.Int64
-			_, err := p.Take(t.Context(), func() int {
-				started.Add(1)
-				return 1
-			})
+			p := &List[int]{
+				MaxItems:   1,
+				MaxWaiters: 1,
+				New: func(context.Context) int {
+					started.Add(1)
+					return 1
+				},
+			}
+			_, err := p.Take(t.Context())
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
 			waiterErr := make(chan error, 1)
 			go func() {
-				_, err := p.Take(t.Context(), func() int {
-					started.Add(1)
-					return 2
-				})
+				_, err := p.Take(t.Context())
 				waiterErr <- err
 			}()
 			synctest.Wait()
@@ -675,10 +688,7 @@ func TestListRetire(t *testing.T) {
 				t.Fatalf("waiting Take() err = %v, want ErrClosed", err)
 			}
 
-			_, err = p.Take(context.Background(), func() int {
-				started.Add(1)
-				return 3
-			})
+			_, err = p.Take(context.Background())
 			if !errors.Is(err, ErrClosed) {
 				t.Fatalf("Take() after Close = %v, want ErrClosed", err)
 			}
@@ -690,36 +700,35 @@ func TestListRetire(t *testing.T) {
 
 	t.Run("replacement load can hand off after oldest waiter cancels", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
+			release := make(chan struct{})
+			var newCalls atomic.Int64
 			p := &List[int]{MaxItems: 1, MaxWaiters: 2}
 
-			_, err := p.Take(t.Context(), func() int { return 1 })
+			_, err := p.Take(context.WithValue(t.Context(), listTestContextKey{}, 1))
 			if err != nil {
 				t.Fatal("initial Take():", err)
 			}
 
-			release := make(chan struct{})
-			waiter1Ctx, cancelWaiter1 := context.WithCancel(t.Context())
+			p.New = func(ctx context.Context) int {
+				newCalls.Add(1)
+				<-release
+				return ctx.Value(listTestContextKey{}).(int)
+			}
+
+			waiter1Ctx, cancelWaiter1 := context.WithCancel(context.WithValue(t.Context(), listTestContextKey{}, 11))
 			defer cancelWaiter1()
 
-			var waiter1Loads atomic.Int64
 			waiter1Err := make(chan error, 1)
 			go func() {
-				_, err := p.Take(waiter1Ctx, func() int {
-					waiter1Loads.Add(1)
-					<-release
-					return 11
-				})
+				_, err := p.Take(waiter1Ctx)
 				waiter1Err <- err
 			}()
 			synctest.Wait()
 
-			var waiter2Loads atomic.Int64
 			waiter2Result := make(chan int, 1)
 			go func() {
-				v, err := p.Take(t.Context(), func() int {
-					waiter2Loads.Add(1)
-					return 22
-				})
+				ctx := context.WithValue(t.Context(), listTestContextKey{}, 22)
+				v, err := p.Take(ctx)
 				if err != nil {
 					t.Errorf("waiter 2 Take(): %v", err)
 					return
@@ -731,11 +740,8 @@ func TestListRetire(t *testing.T) {
 			p.Retire()
 			synctest.Wait()
 
-			if got := waiter1Loads.Load(); got != 1 {
-				t.Fatalf("waiter 1 loads = %d, want 1", got)
-			}
-			if got := waiter2Loads.Load(); got != 0 {
-				t.Fatalf("waiter 2 loads before handoff = %d, want 0", got)
+			if got := newCalls.Load(); got != 1 {
+				t.Fatalf("New calls before handoff = %d, want 1", got)
 			}
 
 			cancelWaiter1()
@@ -749,9 +755,6 @@ func TestListRetire(t *testing.T) {
 			}
 			if got := <-waiter2Result; got != 11 {
 				t.Fatalf("waiter 2 got %d, want 11", got)
-			}
-			if got := waiter2Loads.Load(); got != 0 {
-				t.Fatalf("waiter 2 loads after handoff = %d, want 0", got)
 			}
 		})
 	})

@@ -35,14 +35,18 @@ var (
 //
 // Waiters are served in FIFO order. When no waiters are present, ready
 // items are stored in a LIFO stack. When the ready queue is empty and
-// MaxItems allows, Take spawns a goroutine to create a new item.
+// MaxItems allows, Take spawns a goroutine to create a new item with [List.New].
 //
 // The zero value is a usable List with no limits.
 // It is safe for concurrent use.
 type List[Item any] struct {
-	// MaxItems is the maximum number of items to create via load functions.
+	// MaxItems is the maximum number of items to create via New.
 	// Zero means no limit.
 	MaxItems int
+
+	// New creates an item when the ready queue is empty and MaxItems allows.
+	// If nil, New returns the zero value of Item.
+	New func(context.Context) Item
 
 	// MaxWaiters is the maximum number of goroutines that can wait.
 	// Take returns ErrMaxWaiters when this limit is reached.
@@ -54,7 +58,7 @@ type List[Item any] struct {
 	ready   queue.Lifo[Item] // LIFO stack of ready items
 	loads   int              // number of live items tracked by the list
 
-	// waitersMu guards waiters, and testHookWaiterCanceled.
+	// waitersMu guards waiters and testHookWaiterCanceled.
 	waitersMu sync.Mutex
 	waiters   queue.Fifo[*waiter[Item]] // FIFO queue of waiters
 
@@ -66,8 +70,8 @@ type List[Item any] struct {
 }
 
 type waiter[T any] struct {
-	ch   chan T
-	load func() T
+	ctx context.Context
+	ch  chan T
 }
 
 // Close closes the List. Waiting goroutines are unblocked and will
@@ -97,13 +101,13 @@ func (p *List[T]) Close() {
 //
 // If a ready item exists, Take returns it immediately regardless of ctx
 // or close state. Otherwise, if MaxItems has not been reached, Take spawns
-// a goroutine to call load (or a function returning the zero value if load
+// a goroutine to call New (or a function returning the zero value if New
 // is nil) and waits in FIFO order for a result.
 //
 // Take returns [ErrMaxWaiters] if the waiter limit is reached.
 // Take returns [ErrClosed] when closed with no ready items remaining.
 // Take returns the context error if ctx is canceled before receiving an item.
-func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
+func (p *List[T]) Take(ctx context.Context) (T, error) {
 	var zero T
 
 	p.readyMu.Lock()
@@ -141,8 +145,8 @@ func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
 		ch = make(chan T, 1)
 	}
 	waiter := &waiter[T]{
-		ch:   ch,
-		load: normalizeLoad(load),
+		ctx: ctx,
+		ch:  ch,
 	}
 	p.waiters.Unshift(waiter)
 
@@ -171,7 +175,7 @@ func (p *List[T]) Take(ctx context.Context, load func() T) (T, error) {
 
 // TryTake returns the next ready item without blocking and ok=true; otherwise,
 // it returns a zero value and ok=false.
-// Unlike [Take], it never waits and never spawns load goroutines.
+// Unlike [Take], it never waits and never spawns New goroutines.
 func (p *List[T]) TryTake() (_ T, ok bool) {
 	p.readyMu.Lock()
 	defer p.readyMu.Unlock()
@@ -229,8 +233,8 @@ func (p *List[T]) Put(v T) (accepted bool) {
 
 // Retire permanently removes one checked-out item from the live item count.
 //
-// If the List is open and the oldest waiting goroutine has not yet had its
-// load started, Retire starts exactly one replacement load for that waiter.
+// If the List is open and there is a waiting goroutine, Retire starts exactly
+// one replacement load using [List.New] with the oldest waiter's context.
 // If there are no live items to retire, Retire is a no-op.
 func (p *List[T]) Retire() {
 	p.readyMu.Lock()
@@ -277,11 +281,11 @@ func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
 	return zero, errUnlessMissed
 }
 
-func normalizeLoad[T any](load func() T) func() T {
-	if load != nil {
-		return load
+func normalizeNew[T any](new func(context.Context) T) func(context.Context) T {
+	if new != nil {
+		return new
 	}
-	return func() (zero T) { return }
+	return func(context.Context) (zero T) { return }
 }
 
 func (p *List[T]) startNextLoadLocked() {
@@ -294,5 +298,6 @@ func (p *List[T]) startNextLoadLocked() {
 		return
 	}
 	p.loads++
-	go func() { p.Put(waiter.load()) }()
+	newItem := normalizeNew(p.New)
+	go func() { p.Put(newItem(waiter.ctx)) }()
 }
