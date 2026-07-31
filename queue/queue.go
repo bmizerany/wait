@@ -28,7 +28,9 @@ func (q *Fifo[E]) Shift() (v E, ok bool) {
 		return zero, false
 	}
 	v = q.a[0]
-	q.a = append(q.a[:0], q.a[1:]...)
+	copy(q.a, q.a[1:])
+	q.a[len(q.a)-1] = zero // release the vacated slot, like Pop
+	q.a = q.a[:len(q.a)-1]
 	return v, true
 }
 

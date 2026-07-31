@@ -55,6 +55,22 @@ func TestFifo(t *testing.T) {
 	}
 }
 
+func TestFifoShiftReleasesTail(t *testing.T) {
+	var q Fifo[*int]
+	q.Unshift(new(int))
+	q.Unshift(new(int))
+	q.Unshift(new(int))
+
+	for range 3 {
+		q.Shift()
+		for i, p := range q.a[len(q.a):cap(q.a)] {
+			if p != nil {
+				t.Fatalf("slot %d beyond Len() retains %p, want nil", len(q.a)+i, p)
+			}
+		}
+	}
+}
+
 func TestFifoFront(t *testing.T) {
 	var q Fifo[int]
 
