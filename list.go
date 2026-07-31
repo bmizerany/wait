@@ -12,6 +12,9 @@
 // fairness or creation limits, a buffered channel is simpler.
 // Checked-out items return to the pool with [List.Put] or permanently leave
 // it with [List.Retire].
+//
+// A [Line] pools nothing: it admits demands in strict first-come order
+// to capacity the caller accounts for, blocking each demand until it fits.
 package wait
 
 import (
@@ -27,7 +30,8 @@ var (
 	// ErrMaxWaiters is returned by [List.Take] when MaxWaiters is exceeded.
 	ErrMaxWaiters = errors.New("too many waiters")
 
-	// ErrClosed is returned by [List.Take] when the List is closed.
+	// ErrClosed is returned by [List.Take] and [Line.Wait] when the
+	// List or Line is closed.
 	ErrClosed = errors.New("closed")
 )
 
