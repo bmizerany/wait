@@ -2,78 +2,131 @@
 
 [![Go Reference](https://pkg.go.dev/badge/blake.io/wait.svg)](https://pkg.go.dev/blake.io/wait)
 
-A waitlist for pooling reusable resources.
+When many goroutines need the same scarce resource, an ordinary pool can leave
+you with two bad choices: create resources without a firm limit, or make
+callers compete for returned resources with no useful fairness guarantee.
+`wait` lets you set a hard limit and keeps waiting callers in line, so a new
+arrival cannot repeatedly jump ahead of work already waiting.
 
-## What
+Use it for database connections, API concurrency budgets, device handles, or
+any reusable resource that is expensive or unsafe to over-create. Use
+`wait.List` when the package should own the pool of resources. Use `wait.Gate`
+when your program already owns the resources and needs to decide which request
+gets to use limited capacity next.
 
-`wait.List` manages a pool of items where waiters are served in FIFO order and item creation is lazy up to a configurable limit.
+If you do not need a hard creation limit or FIFO service, a buffered channel is
+usually simpler. If you only want to reuse temporary allocations, use
+`sync.Pool`.
 
-## Why
+## Pool resources with `List`
 
-Sometimes you need to bound how many of something you create—database connections, file handles, expensive objects. And sometimes fairness matters: you don't want request 10,000 to starve while requests 10,001-11,000 get serviced.
+`List` is useful when you need to cap live resources without eagerly creating
+them all. For example, a service can reuse up to ten database connections,
+while additional requests wait instead of opening an eleventh connection or
+crowding out earlier requests. `MaxWaiters` sets a hard cap on pending `Take`
+calls and reservations; excess requests return `ErrMaxWaiters` instead of
+joining the queue. A request context can also bound how long a caller waits:
+cancellation removes a pending `Take` or `Reserve` from the line. Give the
+context a deadline when waiting longer than a fixed duration is not useful.
 
-A buffered channel can pool things, but can't guarantee fairness or control creation.
-`sync.Pool` reduces allocation overhead but doesn't bound creation or provide ordering.
-`wait.List` trades some throughput for predictable latency and bounded resource use.
+Queued callers receive items in FIFO order. When no callers are waiting,
+returned items are kept in a LIFO stack for reuse. Items are created lazily up
+to `MaxItems`. Zero limits mean no limit; the zero value is ready to use and
+creates zero-valued items if `New` is nil.
 
-## When
-
-Use this when:
-- Resources are expensive to create
-- Fairness matters
-- You need a hard cap on instances
-
-Don't use this when:
-- A buffered channel is sufficient
-- You don't care about fairness
-- Maximum throughput is the only goal
-
-## How
+Use `Take` to wait for an item when it is needed:
 
 ```go
-pool := &wait.List[*sql.Conn]{
-    MaxItems:   10,  // never create more than 10 connections
-    MaxWaiters: 100, // reject requests if queue is too long
-    New: func() *sql.Conn {
-        // only called if we haven't hit MaxItems
-        return openConnection()
-    },
-}
+var conns wait.List[*sql.Conn]
+conns.MaxItems = 10
+conns.New = openConnection // openConnection returns *sql.Conn
 
-conn, err := pool.Take(ctx)
+conn, err := conns.Take(ctx)
 if err != nil {
-    return err
+	return err
 }
-defer pool.Put(conn)
+defer conns.Put(conn)
 
 // use conn
 ```
 
-To join the line before doing other work, reserve an item and wait for it later:
+`List.New` has no error result, so handle fallible creation outside `List` or
+include the failure in the item type. Every item returned by `Take` must be
+returned with `Put` or removed from the pool with `Retire`.
+
+Use `Reserve` to take a place in line before doing other work:
 
 ```go
-future, err := pool.Reserve(ctx)
+future, err := conns.Reserve(ctx)
 if err != nil {
-    return err // closed, canceled, or too many waiters
+	return err
 }
 
 prepareRequest()
 
 conn, err := future.Wait()
 if err != nil {
-    return err // canceled or closed while waiting
+	return err
 }
-defer pool.Put(conn)
+defer conns.Put(conn)
 
 // use conn
 ```
 
-Canceling `ctx` removes a pending reservation from the line, even if `Wait` is
-never called. Once an item has been assigned, the caller owns it and must return
-or retire it; canceling `ctx` does not take it back.
+Canceling the reservation context removes a pending reservation, even if
+`Wait` has not been called. If the item was assigned first, the future holds a
+checkout; call `Wait` even after cancellation and return or retire any item it
+returns. `Future.Wait` may be called repeatedly or concurrently and returns
+the same result each time.
 
-Call `Put` to return a reusable checked-out item. Call `Retire` instead when
-the checked-out item should never be returned and the pool should eventually
-replace it.
+`Close` wakes pending calls and rejects later returns. Ready items can still
+be drained after close with `Take`, `Reserve`, or `TryTake`. Close the list
+when its owner no longer accepts new work; checked-out items remain the
+caller's responsibility.
 
-See [package documentation](https://pkg.go.dev/blake.io/wait) for details.
+## Limit access with `Gate`
+
+`Gate` is useful when resources do not belong in a pool, but concurrent work
+still needs a budget. For example, requests may consume different amounts of
+API quota, memory, or worker capacity. `Gate` lets the application decide
+whether the next request fits, and makes later requests wait their turn. It
+holds no items; the caller tracks available capacity in `Fill` and `Refill`.
+Admission is strictly in arrival order, so a large request at the front can
+hold smaller requests behind it until enough capacity is available.
+
+```go
+var available = 10
+g := wait.Gate[int]{
+	Fill: func(n int) bool {
+		if n > available {
+			return false
+		}
+		available -= n
+		return true
+	},
+	Refill: func(n int) { available += n },
+}
+
+if err := g.Wait(ctx, 3); err != nil {
+	return err
+}
+defer g.Put(3)
+```
+
+`Fill` and `Refill` run while the gate is locked. They must not block or call
+back into that gate. `Fill` changes the caller's accounting only when it
+returns true; `Refill` returns capacity when a caller releases its demand.
+`Gate` has no waiter-count limit, so pass a context with a deadline to `Wait`
+when queued demands should stop waiting after a fixed duration. Use `TryWait`
+when a demand should fail immediately instead of queueing.
+
+## Choosing a primitive
+
+Use `List` when the package should store, create, hand off, and count reusable
+items. Use `Gate` when the caller owns the resources and needs FIFO admission
+to its own capacity accounting. A buffered channel can be simpler when FIFO
+fairness and a creation limit do not matter; `sync.Pool` is for temporary
+allocation reuse and does not impose either limit or ordering.
+
+See the [package documentation](https://pkg.go.dev/blake.io/wait) for the
+complete API contracts.

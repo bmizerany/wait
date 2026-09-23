@@ -1,20 +1,16 @@
-// Package wait provides a waitlist for pooling reusable resources.
+// Package wait provides FIFO waitlists for reusable items and capacity.
 //
-// A [List] manages a pool of items with two key properties: waiters are
-// served in FIFO order, and item creation is lazy up to a configurable limit.
-// This makes it suitable for expensive resources like database connections
-// where fairness matters and you want to avoid creating more than necessary.
+// A [List] lazily creates items up to a limit and gives them to queued callers
+// in arrival order. Ready items wait in a LIFO stack. The caller returns a
+// checked-out item with [List.Put] or removes it permanently with [List.Retire].
 //
-// Unlike sync.Pool, which is designed for reducing allocation overhead of
-// temporary objects, List bounds resource creation and guarantees FIFO fairness.
+// A [Gate] stores no items. It admits demands in strict arrival order against
+// capacity tracked by the caller. Its [Gate.Fill] and [Gate.Refill] callbacks
+// update that accounting.
 //
-// List trades some throughput for predictable latency. If you don't need
-// fairness or creation limits, a buffered channel is simpler.
-// Checked-out items return to the pool with [List.Put] or permanently leave
-// it with [List.Retire].
-//
-// A [Gate] pools nothing: it admits demands in strict first-come order
-// to capacity the caller accounts for, blocking each demand until it fits.
+// Use a buffered channel when FIFO order and lazy creation limits are not
+// needed. Use [sync.Pool] for temporary allocation reuse, not for a bounded
+// resource pool.
 package wait
 
 import (
