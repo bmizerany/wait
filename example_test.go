@@ -91,10 +91,8 @@ func ExampleGate() {
 		log.Fatal(err)
 	}
 
-	// A ctx that is already done asks only for what fits now.
-	now, cancel := context.WithCancel(context.Background())
-	cancel()
-
+	// now is a package-level ctx that is already done (see the now
+	// example), so these Takes ask only for what fits at once.
 	if _, err := g.Take(now, 4).Value(); err != nil {
 		fmt.Println("4 does not fit beside 8")
 	}
