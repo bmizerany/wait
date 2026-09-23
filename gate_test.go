@@ -10,13 +10,13 @@ import (
 	"time"
 )
 
-// testLine returns a Line admitting int demands against capacity
+// testGate returns a Gate admitting int demands against capacity
 // total, plus a func reporting the current free capacity. The free
-// counter is mutated only under the Line's lock; tests read it after
+// counter is mutated only under the Gate's lock; tests read it after
 // synctest.Wait, when the bubble is quiesced.
-func testLine(total int) (*Line[int], func() int) {
+func testGate(total int) (*Gate[int], func() int) {
 	free := total
-	l := &Line[int]{
+	l := &Gate[int]{
 		Fill: func(d int) bool {
 			if d > free {
 				return false
@@ -29,9 +29,9 @@ func testLine(total int) (*Line[int], func() int) {
 	return l, func() int { return free }
 }
 
-func TestLine(t *testing.T) {
+func TestGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l, free := testLine(4)
+		l, free := testGate(4)
 
 		checkWait := func(d int) {
 			t.Helper()
@@ -64,9 +64,9 @@ func TestLine(t *testing.T) {
 	})
 }
 
-func TestLineZeroValue(t *testing.T) {
+func TestGateZeroValue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		var l Line[string]
+		var l Gate[string]
 
 		// nil Fill admits everything; nil Refill is a no-op.
 		for range 3 {
@@ -81,9 +81,9 @@ func TestLineZeroValue(t *testing.T) {
 	})
 }
 
-func TestLineStrictFIFO(t *testing.T) {
+func TestGateStrictFIFO(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l, free := testLine(4)
+		l, free := testGate(4)
 
 		// A takes most of the capacity.
 		if err := l.Wait(t.Context(), 3); err != nil {
@@ -127,9 +127,9 @@ func TestLineStrictFIFO(t *testing.T) {
 	})
 }
 
-func TestLinePutCascade(t *testing.T) {
+func TestGatePutCascade(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l, free := testLine(6)
+		l, free := testGate(6)
 
 		if err := l.Wait(t.Context(), 6); err != nil {
 			t.Fatal("draining:", err)
@@ -169,9 +169,9 @@ func TestLinePutCascade(t *testing.T) {
 	})
 }
 
-func TestLineTryWait(t *testing.T) {
+func TestGateTryWait(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l, free := testLine(4)
+		l, free := testGate(4)
 
 		// Empty line: TryWait admits what fits.
 		if !l.TryWait(3) {
@@ -205,10 +205,10 @@ func TestLineTryWait(t *testing.T) {
 	})
 }
 
-func TestLineWaitContextCancel(t *testing.T) {
+func TestGateWaitContextCancel(t *testing.T) {
 	t.Run("early cancel", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(1)
+			l, free := testGate(1)
 
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
@@ -224,7 +224,7 @@ func TestLineWaitContextCancel(t *testing.T) {
 
 	t.Run("waiting cancel", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(1)
+			l, free := testGate(1)
 
 			if err := l.Wait(t.Context(), 1); err != nil {
 				t.Fatal("draining:", err)
@@ -256,7 +256,7 @@ func TestLineWaitContextCancel(t *testing.T) {
 
 	t.Run("mid-queue cancel is skipped over", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(3)
+			l, free := testGate(3)
 
 			if err := l.Wait(t.Context(), 3); err != nil {
 				t.Fatal("draining:", err)
@@ -304,7 +304,7 @@ func TestLineWaitContextCancel(t *testing.T) {
 
 	t.Run("head cancel unblocks a fitting successor", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(3)
+			l, free := testGate(3)
 
 			if err := l.Wait(t.Context(), 1); err != nil {
 				t.Fatal("A Wait(1):", err)
@@ -349,19 +349,19 @@ func TestLineWaitContextCancel(t *testing.T) {
 	})
 }
 
-// TestLineNearMiss tests the near-miss scenario where an admission
+// TestGateNearMiss tests the near-miss scenario where an admission
 // arrives just as the context is being canceled. Unlike List, which
 // hands the raced value to the caller, a canceled Wait refunds the
 // raced grant and reports the cancellation. This test uses the
-// internal testHookLineWaiterCanceled field to reliably induce the
+// internal testHookGateWaiterCanceled field to reliably induce the
 // race condition.
-func TestLineNearMiss(t *testing.T) {
+func TestGateNearMiss(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l, free := testLine(1)
+		l, free := testGate(1)
 
 		// Induce the near miss: admit the canceling waiter the
 		// instant it begins handling its cancellation.
-		l.testHookLineWaiterCanceled = func() { l.Put(1) }
+		l.testHookGateWaiterCanceled = func() { l.Put(1) }
 
 		if err := l.Wait(t.Context(), 1); err != nil {
 			t.Fatal("draining:", err)
@@ -391,10 +391,10 @@ func TestLineNearMiss(t *testing.T) {
 	})
 }
 
-func TestLineClose(t *testing.T) {
+func TestGateClose(t *testing.T) {
 	t.Run("unblocks waiters", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(1)
+			l, free := testGate(1)
 
 			if err := l.Wait(t.Context(), 1); err != nil {
 				t.Fatal("draining:", err)
@@ -430,7 +430,7 @@ func TestLineClose(t *testing.T) {
 
 	t.Run("wait after", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, _ := testLine(1)
+			l, _ := testGate(1)
 
 			l.Close()
 
@@ -445,7 +445,7 @@ func TestLineClose(t *testing.T) {
 
 	t.Run("put after close still refills", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, free := testLine(1)
+			l, free := testGate(1)
 
 			if err := l.Wait(t.Context(), 1); err != nil {
 				t.Fatal("draining:", err)
@@ -464,7 +464,7 @@ func TestLineClose(t *testing.T) {
 
 	t.Run("idempotent", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l, _ := testLine(1)
+			l, _ := testGate(1)
 
 			l.Close()
 			l.Close()
@@ -477,18 +477,18 @@ func TestLineClose(t *testing.T) {
 	})
 }
 
-// TestLineFairness admits mixed-size demands and requires service in
+// TestGateFairness admits mixed-size demands and requires service in
 // exact join order, no matter how capacity trickles back. Admission
-// order is observed from inside Fill, which runs under the Line's lock
+// order is observed from inside Fill, which runs under the Gate's lock
 // in exactly admission order.
-func TestLineFairness(t *testing.T) {
+func TestGateFairness(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		type demand struct{ id, size int }
 
 		const total = 10
 		free := total
 		var order []int
-		l := &Line[demand]{
+		l := &Gate[demand]{
 			Fill: func(d demand) bool {
 				if d.size > free {
 					return false
@@ -536,11 +536,11 @@ func TestLineFairness(t *testing.T) {
 	})
 }
 
-func BenchmarkLine(b *testing.B) {
+func BenchmarkGate(b *testing.B) {
 	b.Run("uncontended", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			free := 1
-			l := &Line[int]{
+			l := &Gate[int]{
 				Fill: func(d int) bool {
 					if d > free {
 						return false
@@ -566,7 +566,7 @@ func BenchmarkLine(b *testing.B) {
 		var tttp atomic.Int64 // total-time-to-put
 
 		free := 10
-		l := &Line[int]{
+		l := &Gate[int]{
 			Fill: func(d int) bool {
 				if d > free {
 					return false

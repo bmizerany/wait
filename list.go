@@ -13,7 +13,7 @@
 // Checked-out items return to the pool with [List.Put] or permanently leave
 // it with [List.Retire].
 //
-// A [Line] pools nothing: it admits demands in strict first-come order
+// A [Gate] pools nothing: it admits demands in strict first-come order
 // to capacity the caller accounts for, blocking each demand until it fits.
 package wait
 
@@ -31,7 +31,7 @@ var (
 	ErrMaxWaiters = errors.New("too many waiters")
 
 	// ErrClosed is returned by [List.Take], [List.Reserve],
-	// [Future.Wait], and [Line.Wait] when the List or Line is closed.
+	// [Future.Wait], and [Gate.Wait] when the List or Gate is closed.
 	ErrClosed = errors.New("closed")
 )
 
