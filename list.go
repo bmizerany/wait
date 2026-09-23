@@ -1,9 +1,11 @@
 // Package wait provides FIFO waitlists for reusable items and capacity.
 //
 // A [List] pools items added with [List.Put] and can create more lazily up to a
-// limit. It gives queued callers items in arrival order and stores unused ones
-// in a LIFO stack. The caller returns checked-out items with [List.Put] or
-// removes them with [List.Retire].
+// limit. Queued callers get items in arrival order, so waiting is fair, and
+// unused items wait in a LIFO stack, so the next caller gets the most recently
+// used item, whose connection or cache is likeliest to still be warm. The
+// caller returns checked-out items with [List.Put] or removes them with
+// [List.Retire].
 //
 // A [Gate] stores no items. It admits demands in strict arrival order against
 // capacity the caller keeps track of: [Gate.Claim] takes a demand's share,
@@ -37,8 +39,9 @@ var (
 //
 // It pools items added with [List.Put] and can create more lazily up to
 // MaxItems. Queued callers receive items in FIFO order; unused items wait in a
-// LIFO stack. The caller returns checked-out items with [List.Put] or removes
-// them with [List.Retire].
+// LIFO stack, so the next caller gets the most recently used, warmest item.
+// The caller returns checked-out items with [List.Put] or removes them with
+// [List.Retire].
 //
 // The zero value has no limits and creates zero-valued items if New is nil.
 // List is safe for concurrent use.
