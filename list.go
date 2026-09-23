@@ -27,11 +27,11 @@ import (
 )
 
 var (
-	// ErrMaxWaiters is returned by [List.Take] when MaxWaiters is exceeded.
+	// ErrMaxWaiters is returned by [List.Take] and [List.Reserve] when MaxWaiters is exceeded.
 	ErrMaxWaiters = errors.New("too many waiters")
 
-	// ErrClosed is returned by [List.Take] and [Line.Wait] when the
-	// List or Line is closed.
+	// ErrClosed is returned by [List.Take], [List.Reserve],
+	// [Future.Wait], and [Line.Wait] when the List or Line is closed.
 	ErrClosed = errors.New("closed")
 )
 
@@ -52,8 +52,8 @@ type List[Item any] struct {
 	// If nil, New returns the zero value of Item.
 	New func() Item
 
-	// MaxWaiters is the maximum number of goroutines that can wait.
-	// Take returns ErrMaxWaiters when this limit is reached.
+	// MaxWaiters is the maximum number of pending Take calls and reservations.
+	// Take and Reserve return ErrMaxWaiters when this limit is reached.
 	// Zero means no limit.
 	MaxWaiters int
 
@@ -62,7 +62,7 @@ type List[Item any] struct {
 	ready   queue.Lifo[Item] // LIFO stack of ready items
 	loads   int              // number of live items tracked by the list
 
-	// waitersMu guards waiters and testHookWaiterCanceled.
+	// waitersMu guards waiters, their reservation state, and testHookWaiterCanceled.
 	waitersMu sync.Mutex
 	waiters   queue.Fifo[*waiter[Item]] // FIFO queue of waiters
 
@@ -75,12 +75,16 @@ type List[Item any] struct {
 
 type waiter[T any] struct {
 	ch      chan T
+	future  *Future[T]
+	ctx     context.Context // non-nil for a reservation
+	stop    func() bool
+	done    bool // guarded by waitersMu
 	loading bool
 }
 
-// Close closes the List. Waiting goroutines are unblocked and will
-// receive [ErrClosed]. Ready items can still be drained via Take or
-// TryTake. Future Put calls return false. Close is idempotent.
+// Close closes the List. It unblocks pending Take calls and reservations.
+// Ready items can still be drained via Take, Reserve, or TryTake. Future Put
+// calls return false. Close is idempotent.
 func (p *List[T]) Close() {
 	if p.closed.Swap(true) {
 		// Already closed
@@ -96,8 +100,76 @@ func (p *List[T]) Close() {
 		if !ok {
 			break
 		}
-		close(waiter.ch)
+		if waiter.future != nil {
+			var zero T
+			if waiter.ctx.Err() != nil {
+				p.finishFutureLocked(waiter, zero, context.Cause(waiter.ctx))
+			} else {
+				p.finishFutureLocked(waiter, zero, ErrClosed)
+			}
+		} else {
+			close(waiter.ch)
+		}
 	}
+}
+
+// Reserve gets in line for an item and returns a Future that can be waited on
+// later. It returns an error immediately if the list is closed, the context is
+// already canceled, or MaxWaiters has been reached. A ready item is reserved
+// even when the list is closed or the context is canceled.
+//
+// Once Reserve succeeds, cancellation removes a pending reservation from the
+// queue and causes Future.Wait to return the context cause. A successful future
+// holds one checked-out item, which the caller must Put or Retire. The caller
+// should call Wait even after cancellation, since an item may have arrived first.
+func (p *List[T]) Reserve(ctx context.Context) (*Future[T], error) {
+	p.readyMu.Lock()
+	if v, ok := p.ready.Pop(); ok {
+		p.readyMu.Unlock()
+		f := newFuture[T]()
+		f.resolve(v, nil)
+		return f, nil
+	}
+	if p.closed.Load() {
+		p.readyMu.Unlock()
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		p.readyMu.Unlock()
+		return nil, context.Cause(ctx)
+	}
+
+	p.waitersMu.Lock()
+	// Close may have started while we acquired waitersMu.
+	if p.closed.Load() {
+		p.waitersMu.Unlock()
+		p.readyMu.Unlock()
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		p.waitersMu.Unlock()
+		p.readyMu.Unlock()
+		return nil, context.Cause(ctx)
+	}
+	if p.MaxWaiters > 0 && p.waiters.Len() >= p.MaxWaiters {
+		p.removeCanceledFuturesLocked()
+		if p.waiters.Len() >= p.MaxWaiters {
+			p.waitersMu.Unlock()
+			p.readyMu.Unlock()
+			return nil, ErrMaxWaiters
+		}
+	}
+
+	f := newFuture[T]()
+	w := &waiter[T]{future: f, ctx: ctx}
+	p.waiters.Unshift(w)
+	w.stop = context.AfterFunc(ctx, func() { p.cancelFuture(w) })
+	if ctx.Err() == nil {
+		p.startNextLoadLocked()
+	}
+	p.waitersMu.Unlock()
+	p.readyMu.Unlock()
+	return f, nil
 }
 
 // Take returns an item from the List, blocking until one is available,
@@ -137,10 +209,18 @@ func (p *List[T]) Take(ctx context.Context) (T, error) {
 	p.waitersMu.Lock()
 
 	// Check MaxWaiters limit
-	if p.MaxWaiters > 0 && p.waiters.Len() >= p.MaxWaiters {
+	if p.closed.Load() {
 		p.waitersMu.Unlock()
 		p.readyMu.Unlock()
-		return zero, ErrMaxWaiters
+		return zero, ErrClosed
+	}
+	if p.MaxWaiters > 0 && p.waiters.Len() >= p.MaxWaiters {
+		p.removeCanceledFuturesLocked()
+		if p.waiters.Len() >= p.MaxWaiters {
+			p.waitersMu.Unlock()
+			p.readyMu.Unlock()
+			return zero, ErrMaxWaiters
+		}
 	}
 
 	// Get in line before we start any loading to ensure FIFO order.
@@ -197,16 +277,28 @@ func (p *List[T]) Put(v T) (accepted bool) {
 
 	maybeHandoff := func(v T) bool {
 		p.waitersMu.Lock()
-		waiter, ok := p.waiters.Shift()
-		p.waitersMu.Unlock()
-		if ok {
+		defer p.waitersMu.Unlock()
+		for {
+			waiter, ok := p.waiters.Shift()
+			if !ok {
+				return false
+			}
+			if waiter.future != nil {
+				if waiter.ctx.Err() != nil {
+					var zero T
+					p.finishFutureLocked(waiter, zero, context.Cause(waiter.ctx))
+					continue
+				}
+				p.finishFutureLocked(waiter, v, nil)
+				return true
+			}
 			select {
 			case waiter.ch <- v:
 			default:
 				panic("waiter: waiter channel full (this is a bug in waitlist)")
 			}
+			return true
 		}
-		return ok
 	}
 
 	// Attempt a handoff without locking readyMu to fast-path high-load
@@ -275,13 +367,54 @@ func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
 	p.waitersMu.Unlock()
 
 	select {
-	case v := <-w.ch:
+	case v, ok := <-w.ch:
 		// Near miss: a value arrived just as we were canceling.
 		// Return it instead of the error.
-		return v, nil
+		if ok {
+			return v, nil
+		}
 	default:
 	}
 	return zero, errUnlessMissed
+}
+
+// finishFutureLocked resolves a reservation. The waiter has already been
+// removed from the queue, or is about to be removed by DeleteFunc.
+func (p *List[T]) finishFutureLocked(w *waiter[T], v T, err error) {
+	if w.done {
+		return
+	}
+	w.done = true
+	if w.stop != nil {
+		w.stop()
+	}
+	w.ctx = nil
+	w.future.resolve(v, err)
+}
+
+func (p *List[T]) cancelFuture(w *waiter[T]) {
+	p.waitersMu.Lock()
+	defer p.waitersMu.Unlock()
+	if w.done {
+		return
+	}
+	err := context.Cause(w.ctx)
+	p.waiters.DeleteFunc(func(queued *waiter[T]) bool { return queued == w })
+	var zero T
+	p.finishFutureLocked(w, zero, err)
+}
+
+// removeCanceledFuturesLocked frees capacity even if cancellation callbacks
+// have not yet run.
+func (p *List[T]) removeCanceledFuturesLocked() {
+	p.waiters.DeleteFunc(func(w *waiter[T]) bool {
+		if w.future == nil || w.ctx.Err() == nil {
+			return false
+		}
+		var zero T
+		p.finishFutureLocked(w, zero, context.Cause(w.ctx))
+		return true
+	})
 }
 
 func normalizeNew[T any](new func() T) func() T {
@@ -314,7 +447,7 @@ func (p *List[T]) canLoadLocked() bool {
 // an item, or nil if none.
 func (p *List[T]) nextWaiterToLoadLocked() *waiter[T] {
 	for waiter := range p.waiters.Values() {
-		if !waiter.loading {
+		if !waiter.loading && (waiter.future == nil || waiter.ctx.Err() == nil) {
 			return waiter
 		}
 	}

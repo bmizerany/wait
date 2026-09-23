@@ -49,6 +49,29 @@ defer pool.Put(conn)
 // use conn
 ```
 
+To join the line before doing other work, reserve an item and wait for it later:
+
+```go
+future, err := pool.Reserve(ctx)
+if err != nil {
+    return err // closed, canceled, or too many waiters
+}
+
+prepareRequest()
+
+conn, err := future.Wait()
+if err != nil {
+    return err // canceled or closed while waiting
+}
+defer pool.Put(conn)
+
+// use conn
+```
+
+Canceling `ctx` removes a pending reservation from the line, even if `Wait` is
+never called. Once an item has been assigned, the caller owns it and must return
+or retire it; canceling `ctx` does not take it back.
+
 Call `Put` to return a reusable checked-out item. Call `Retire` instead when
 the checked-out item should never be returned and the pool should eventually
 replace it.
