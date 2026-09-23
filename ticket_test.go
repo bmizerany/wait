@@ -3,6 +3,7 @@ package wait
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 )
@@ -127,12 +128,100 @@ func TestTicketReleaseWaiting(t *testing.T) {
 
 func TestTicketRetireGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(1)
+		releases := 0
+		g := &Gate[int]{Release: func(int) { releases++ }}
 		tk := held(t, g.Take(t.Context(), 1))
 		tk.Retire()
 		tk.Release() // no effect after Retire
-		if got := free(); got != 0 {
-			t.Fatalf("free after Retire = %d, want 0 (capacity stays spent)", got)
+		if releases != 0 {
+			t.Fatalf("Release calls after Retire then Release = %d, want 0 (capacity stays spent)", releases)
+		}
+	})
+}
+
+func TestTicketRetireList(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var loads atomic.Int64
+		l := &List[int]{
+			MaxItems: 1,
+			New:      func() int { return int(loads.Add(1)) },
+		}
+		tk := held(t, l.Take(t.Context())) // item 1
+		waiter := l.Take(t.Context())
+
+		tk.Retire() // drops item 1, freeing its place for a new item
+		if v, err := waiter.Value(); v != 2 || err != nil {
+			t.Fatalf("waiter.Value() = %d, %v, want 2, nil", v, err)
+		}
+		tk.Release() // must not bring item 1 back
+		if _, ok := l.TryTake(); ok {
+			t.Fatal("TryTake() = true after Retire then Release, want false")
+		}
+		if got := loads.Load(); got != 2 {
+			t.Fatalf("New calls = %d, want 2", got)
+		}
+	})
+}
+
+func TestTicketReleaseThenRetire(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var loads atomic.Int64
+		l := &List[int]{
+			MaxItems: 1,
+			New:      func() int { return int(loads.Add(1)) },
+		}
+		tk := held(t, l.Take(t.Context()))
+		tk.Release()
+		tk.Retire() // must not drop item 1 or free its place
+
+		kept, ok := l.TryTake()
+		if !ok {
+			t.Fatal("TryTake() = false, want item 1 back after Release")
+		}
+		if v, _ := kept.Value(); v != 1 {
+			t.Fatalf("TryTake().Value() = %d, want 1", v)
+		}
+		next := l.Take(t.Context())
+		synctest.Wait() // let any wrongly started New run
+		if next.Ready() {
+			t.Fatal("second Take admitted: Retire freed a place Release had kept")
+		}
+		if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
+			t.Fatalf("Value() after Release and Retire = %v, want ErrReleased", err)
+		}
+
+		g, free := testGate(1)
+		gt := held(t, g.Take(t.Context(), 1))
+		gt.Release()
+		gt.Retire()
+		if got := free(); got != 1 {
+			t.Fatalf("Gate free after Release then Retire = %d, want 1", got)
+		}
+	})
+}
+
+func TestTicketRetireWaiting(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := &List[int]{MaxItems: 1, MaxWaiters: 2}
+		held(t, l.Take(t.Context()))
+
+		tk := l.Take(t.Context())
+		tk.Retire() // leaves the line, freeing its MaxWaiters place
+		tk.Release()
+		if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
+			t.Fatalf("Value() after Retire = %v, want ErrReleased", err)
+		}
+
+		// Both places are free, and the two new Tickets are distinct.
+		a := l.Take(t.Context())
+		b := l.Take(t.Context())
+		l.Add(10)
+		l.Add(20)
+		if v, err := a.Value(); v != 10 || err != nil {
+			t.Fatalf("a.Value() = %d, %v, want 10, nil", v, err)
+		}
+		if v, err := b.Value(); v != 20 || err != nil {
+			t.Fatalf("b.Value() = %d, %v, want 20, nil", v, err)
 		}
 	})
 }
