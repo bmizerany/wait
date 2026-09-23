@@ -120,10 +120,11 @@ func (l *List[T]) Add(v T) bool {
 	return true
 }
 
-// Close fails waiting Tickets with [ErrClosed]. Ready items can still be
-// drained with [List.Take], and items given back by releasing their
-// Tickets after Close join them. Later [List.Add] calls
-// return false. Close is idempotent.
+// Close fails waiting Tickets with [ErrClosed]. After Close, [List.Take]
+// never waits, whatever its ctx: it returns a ready item while any remain,
+// then a Ticket failed with ErrClosed. Items given back by releasing their
+// Tickets after Close join the ready items. Later [List.Add] calls return
+// false. Close is idempotent.
 func (l *List[T]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

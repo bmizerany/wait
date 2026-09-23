@@ -71,6 +71,32 @@ func ExampleTicket_Retire() {
 	// using conn-2
 }
 
+// At shutdown, Close the List and drain its ready items. After Close, Take
+// never waits, whatever its ctx: it returns each ready item, then fails
+// with ErrClosed.
+func ExampleList_Close() {
+	var conns wait.List[string]
+	conns.Add("conn-a")
+	conns.Add("conn-b")
+
+	conns.Close()
+	for {
+		t := conns.Take(context.Background())
+		c, err := t.Value()
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+		fmt.Println("closing", c)
+		t.Retire()
+	}
+
+	// Output:
+	// closing conn-b
+	// closing conn-a
+	// closed
+}
+
 // A Gate over a budget of 10 bytes. Each admitted request holds its bytes
 // until it releases its Ticket.
 func ExampleGate() {

@@ -60,9 +60,10 @@ func (g *Gate[D]) Take(ctx context.Context, d D) Ticket[D] {
 	return t
 }
 
-// Close fails waiting Tickets with [ErrClosed]. Later [Gate.Take] calls
-// return failed Tickets. Releasing a Ticket after Close still gives its
-// capacity back. Close is idempotent.
+// Close fails waiting Tickets with [ErrClosed]. After Close, [Gate.Take]
+// never waits, whatever its ctx: it returns a Ticket failed with
+// ErrClosed. Releasing a Ticket after Close still gives its capacity back.
+// Close is idempotent.
 func (g *Gate[D]) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
