@@ -1,8 +1,8 @@
 package wait
 
-// Future holds the result of a reservation made by [List.Reserve]. Its zero
-// value is not usable. Wait may be called repeatedly or concurrently; every
-// call returns the same result.
+// A Future is the result of a [List.Reserve] call. Its zero value is unusable.
+// Wait may be called repeatedly or concurrently; each call returns the same
+// result.
 type Future[T any] struct {
 	done  chan struct{}
 	value T
@@ -20,9 +20,9 @@ func (f *Future[T]) resolve(v T, err error) {
 	close(f.done)
 }
 
-// Wait blocks until the reservation has completed. If it returns an item,
-// the caller owns one checkout and must return it with [List.Put] or retire it
-// with [List.Retire].
+// Wait returns the reservation result, blocking until it is ready. The caller
+// owns any returned item and must return it with [List.Put] or remove it with
+// [List.Retire].
 func (f *Future[T]) Wait() (T, error) {
 	<-f.done
 	return f.value, f.err

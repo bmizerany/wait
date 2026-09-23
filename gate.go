@@ -7,33 +7,23 @@ import (
 	"blake.io/wait/queue"
 )
 
-// A Gate admits demands in first-come order.
+// A Gate orders access to capacity tracked by the caller.
 //
-// Wait joins the line with a demand and blocks until the demand is
-// admitted, ctx is done, or the Gate is closed. Only the demand at the
-// head of the line is ever offered to Fill; when Fill accepts, that
-// waiter is admitted and the next head is offered. A demand behind the
-// head is never admitted first, no matter how small — strict arrival
-// order, intentional head-of-line blocking.
+// It owns no items. Waiters are admitted strictly in arrival order, so a
+// demand at the front can hold smaller demands behind it. [Gate.Fill] and
+// [Gate.Refill] account for the caller's capacity.
 //
-// Unlike [List], a Gate carries no items. It orders admission to
-// capacity the caller accounts for in Fill and Refill.
-//
-// The zero value is a usable Gate that admits everything.
-// It is safe for concurrent use.
+// The zero value admits every demand. Gate is safe for concurrent use.
 type Gate[D any] struct {
-	// Fill reports whether d can be admitted now, deducting whatever
-	// d needs from the caller's accounting when it returns true.
-	// The Gate calls Fill with its lock held, only ever for the
-	// demand at the head of the line (or for a lone Wait or TryWait
-	// caller when the line is empty), so the accounting needs no
-	// lock of its own. Fill must not block or call back into the
-	// Gate. A nil Fill admits everything.
+	// Fill reports whether d fits and reserves its capacity when returning
+	// true. The Gate calls Fill with its lock held, only for the head waiter
+	// or a lone caller. Fill must not block or call back into the Gate. A nil
+	// Fill admits every demand.
 	Fill func(d D) bool
 
-	// Refill returns d's capacity to the caller's accounting.
-	// Put calls it with the Gate's lock held, before offering the
-	// head of the line to Fill again. A nil Refill is a no-op.
+	// Refill returns d's capacity to the caller's accounting. The Gate calls
+	// it with its lock held before admitting queued demands. Refill must not
+	// block or call back into the Gate. A nil Refill does nothing.
 	Refill func(d D)
 
 	mu      sync.Mutex
@@ -68,14 +58,12 @@ func (w *gateWaiter[D]) signal(err error) {
 	}
 }
 
-// Wait joins the line with demand d and blocks until d is admitted,
-// ctx is done, or the Gate is closed.
+// Wait queues d until it is admitted, ctx is done, or the Gate is closed.
 //
-// If the line is empty and Fill accepts d, Wait admits immediately
-// without queueing. Wait returns nil once admitted, [ErrClosed] if the
-// Gate is closed, and the context cause if ctx is done first — even
-// when an admission raced the cancellation: the raced grant is
-// refunded via Refill, so a non-nil error means d holds nothing.
+// If the line is empty and Fill accepts d, Wait admits it immediately.
+// Wait returns [ErrClosed] if the Gate is closed and the context cause if
+// ctx is done first. If cancellation races with admission, Wait refunds d
+// through Refill before returning the context cause.
 func (l *Gate[D]) Wait(ctx context.Context, d D) error {
 	l.mu.Lock()
 	if l.closed {
@@ -110,10 +98,8 @@ func (l *Gate[D]) Wait(ctx context.Context, d D) error {
 	}
 }
 
-// TryWait admits d without waiting if the line is empty and Fill
-// accepts it, and reports whether d was admitted. A TryWait caller
-// never takes capacity ahead of anyone already in line.
-// TryWait returns false after Close.
+// TryWait admits d only when no one is waiting and Fill accepts it. It
+// returns false when d cannot be admitted or after [Gate.Close].
 func (l *Gate[D]) TryWait(d D) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -123,12 +109,8 @@ func (l *Gate[D]) TryWait(d D) bool {
 	return l.fill(d)
 }
 
-// Put returns d's capacity to the caller's accounting via Refill, then
-// admits from the head of the line for as long as Fill accepts — one
-// Put may admit several waiters. Put never blocks.
-//
-// Put works after Close: the refill still lands, since the accounting
-// belongs to the caller; there is just no one left to admit.
+// Put returns d's capacity through Refill, then admits queued demands while
+// Fill accepts them. Put may admit several waiters and works after Close.
 func (l *Gate[D]) Put(d D) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -136,10 +118,8 @@ func (l *Gate[D]) Put(d D) {
 	l.admitLocked()
 }
 
-// Close closes the Gate. Waiting goroutines are unblocked and receive
-// [ErrClosed]; nothing is refunded, because a demand still in line
-// never deducted anything. Wait and TryWait fail after Close.
-// Close is idempotent.
+// Close wakes queued callers. Later [Gate.Wait] calls return [ErrClosed], and
+// [Gate.TryWait] returns false. Close is idempotent.
 func (l *Gate[D]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

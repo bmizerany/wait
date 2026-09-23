@@ -1,8 +1,9 @@
 // Package wait provides FIFO waitlists for reusable items and capacity.
 //
-// A [List] lazily creates items up to a limit and gives them to queued callers
-// in arrival order. Ready items wait in a LIFO stack. The caller returns a
-// checked-out item with [List.Put] or removes it permanently with [List.Retire].
+// A [List] pools items added with [List.Put] and can create more lazily up to a
+// limit. It gives queued callers items in arrival order and stores unused ones
+// in a LIFO stack. The caller returns checked-out items with [List.Put] or
+// removes them with [List.Retire].
 //
 // A [Gate] stores no items. It admits demands in strict arrival order against
 // capacity tracked by the caller. Its [Gate.Fill] and [Gate.Refill] callbacks
@@ -23,7 +24,8 @@ import (
 )
 
 var (
-	// ErrMaxWaiters is returned by [List.Take] and [List.Reserve] when MaxWaiters is exceeded.
+	// ErrMaxWaiters is returned when [List.Take] or [List.Reserve] would
+	// exceed MaxWaiters.
 	ErrMaxWaiters = errors.New("too many waiters")
 
 	// ErrClosed is returned by [List.Take], [List.Reserve],
@@ -31,14 +33,15 @@ var (
 	ErrClosed = errors.New("closed")
 )
 
-// List is a waitlist for pooling items of type Item.
+// List pools reusable items of type Item.
 //
-// Waiters are served in FIFO order. When no waiters are present, ready
-// items are stored in a LIFO stack. When the ready queue is empty and
-// MaxItems allows, Take spawns a goroutine to create a new item with [List.New].
+// It pools items added with [List.Put] and can create more lazily up to
+// MaxItems. Queued callers receive items in FIFO order; unused items wait in a
+// LIFO stack. The caller returns checked-out items with [List.Put] or removes
+// them with [List.Retire].
 //
-// The zero value is a usable List with no limits.
-// It is safe for concurrent use.
+// The zero value has no limits and creates zero-valued items if New is nil.
+// List is safe for concurrent use.
 type List[Item any] struct {
 	// MaxItems is the maximum number of items to create via New.
 	// Zero means no limit.
@@ -78,8 +81,8 @@ type waiter[T any] struct {
 	loading bool
 }
 
-// Close closes the List. It unblocks pending Take calls and reservations.
-// Ready items can still be drained via Take, Reserve, or TryTake. Future Put
+// Close wakes pending callers with [ErrClosed]. Callers can still drain ready
+// items with [List.Take], [List.Reserve], or [List.TryTake]. Later [List.Put]
 // calls return false. Close is idempotent.
 func (p *List[T]) Close() {
 	if p.closed.Swap(true) {
@@ -109,15 +112,15 @@ func (p *List[T]) Close() {
 	}
 }
 
-// Reserve gets in line for an item and returns a Future that can be waited on
-// later. It returns an error immediately if the list is closed, the context is
-// already canceled, or MaxWaiters has been reached. A ready item is reserved
-// even when the list is closed or the context is canceled.
+// Reserve queues a request for an item and returns a [Future] for its result.
+// It returns [ErrClosed], the context cause, or [ErrMaxWaiters] if it cannot
+// queue the request. A ready item is reserved even if the List is closed or
+// ctx is canceled.
 //
-// Once Reserve succeeds, cancellation removes a pending reservation from the
-// queue and causes Future.Wait to return the context cause. A successful future
-// holds one checked-out item, which the caller must Put or Retire. The caller
-// should call Wait even after cancellation, since an item may have arrived first.
+// Cancellation removes a pending reservation and makes [Future.Wait] return
+// the context cause. If an item was assigned first, the future holds a
+// checkout; call Wait even after cancellation and return or retire any item
+// it returns.
 func (p *List[T]) Reserve(ctx context.Context) (*Future[T], error) {
 	p.readyMu.Lock()
 	if v, ok := p.ready.Pop(); ok {
@@ -168,17 +171,12 @@ func (p *List[T]) Reserve(ctx context.Context) (*Future[T], error) {
 	return f, nil
 }
 
-// Take returns an item from the List, blocking until one is available,
-// ctx is done, or the List is closed.
+// Take returns an item, waiting until one is available, ctx is done, or the
+// List is closed.
 //
-// If a ready item exists, Take returns it immediately regardless of ctx
-// or close state. Otherwise, if MaxItems has not been reached, Take spawns
-// a goroutine to call New (or a function returning the zero value if New
-// is nil) and waits in FIFO order for a result.
-//
-// Take returns [ErrMaxWaiters] if the waiter limit is reached.
-// Take returns [ErrClosed] when closed with no ready items remaining.
-// Take returns the context error if ctx is canceled before receiving an item.
+// A ready item takes precedence over cancellation and close. Otherwise, Take
+// returns [ErrClosed] when closed, [ErrMaxWaiters] when the waiter limit is
+// reached, or the context cause when canceled before an item is assigned.
 func (p *List[T]) Take(ctx context.Context) (T, error) {
 	var zero T
 
@@ -252,20 +250,16 @@ func (p *List[T]) Take(ctx context.Context) (T, error) {
 	}
 }
 
-// TryTake returns the next ready item without blocking and ok=true; otherwise,
-// it returns a zero value and ok=false.
-// Unlike [Take], it never waits and never spawns New goroutines.
+// TryTake returns the next ready item, if any. It never waits or creates an
+// item.
 func (p *List[T]) TryTake() (_ T, ok bool) {
 	p.readyMu.Lock()
 	defer p.readyMu.Unlock()
 	return p.ready.Pop()
 }
 
-// Put adds v to the List. If waiters exist, v is handed to the longest-waiting
-// goroutine in FIFO order. Otherwise, v is added to the ready stack in LIFO order.
-//
-// Put returns false if the List is closed, true otherwise.
-// Put does not block.
+// Put returns v to the List. It hands v to the longest-waiting caller, or
+// stores it for later reuse. Put returns false after [List.Close].
 func (p *List[T]) Put(v T) (accepted bool) {
 	if p.closed.Load() {
 		return false
@@ -322,11 +316,9 @@ func (p *List[T]) Put(v T) (accepted bool) {
 	return true
 }
 
-// Retire permanently removes one checked-out item from the live item count.
-//
-// If the List is open and there is a waiting goroutine, Retire starts exactly
-// one replacement load using [List.New].
-// If there are no live items to retire, Retire is a no-op.
+// Retire removes one checked-out item from the live item count. If the List
+// has a waiter and is open, Retire starts a replacement load. It does nothing
+// when there are no live items.
 func (p *List[T]) Retire() {
 	p.readyMu.Lock()
 	defer p.readyMu.Unlock()
