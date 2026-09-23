@@ -39,87 +39,87 @@ type Gate[D any] struct {
 // returns [ErrClosed] if the Gate is closed and the context cause if ctx
 // is done first. A Wait that returns an error holds nothing: if d was
 // admitted as ctx was canceled, Wait releases it before returning.
-func (l *Gate[D]) Wait(ctx context.Context, d D) error {
-	l.mu.Lock()
-	if l.closed {
-		l.mu.Unlock()
+func (g *Gate[D]) Wait(ctx context.Context, d D) error {
+	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
 		return ErrClosed
 	}
 	if ctx.Err() != nil {
-		l.mu.Unlock()
+		g.mu.Unlock()
 		return context.Cause(ctx)
 	}
-	if _, ok := l.waiters.front(); !ok && l.claim(d) {
-		l.mu.Unlock()
+	if _, ok := g.waiters.front(); !ok && g.claim(d) {
+		g.mu.Unlock()
 		return nil
 	}
-	w, _ := l.waiters.join(ctx, d, nil, 0)
-	l.mu.Unlock()
+	w, _ := g.waiters.join(ctx, d, nil, 0)
+	g.mu.Unlock()
 
-	r, canceled := l.waiters.wait(&l.mu, w)
+	r, canceled := g.waiters.wait(&g.mu, w)
 	if !canceled {
 		return r.err
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	g.mu.Lock()
+	defer g.mu.Unlock()
 	if r.err == nil {
 		// Admitted just as we were canceling: give it back, so a
 		// canceled Wait holds nothing.
-		l.release(d)
+		g.release(d)
 	}
 	// w may have been the head; its successor may fit now.
-	l.admitLocked()
+	g.admitLocked()
 	return context.Cause(ctx)
 }
 
 // TryWait admits d only when no one is waiting and Claim takes it. It
 // returns false when d cannot be admitted or after [Gate.Close].
-func (l *Gate[D]) TryWait(d D) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if _, ok := l.waiters.front(); l.closed || ok {
+func (g *Gate[D]) TryWait(d D) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.waiters.front(); g.closed || ok {
 		return false
 	}
-	return l.claim(d)
+	return g.claim(d)
 }
 
 // Put gives back d's capacity through Release, then admits waiters from
 // the front of the line while Claim takes them. Put may admit several
 // waiters and works after Close.
-func (l *Gate[D]) Put(d D) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.release(d)
-	l.admitLocked()
+func (g *Gate[D]) Put(d D) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.release(d)
+	g.admitLocked()
 }
 
 // Close wakes queued callers. Later [Gate.Wait] calls return [ErrClosed], and
 // [Gate.TryWait] returns false. Close is idempotent.
-func (l *Gate[D]) Close() {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.closed = true
-	l.waiters.close()
+func (g *Gate[D]) Close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = true
+	g.waiters.close()
 }
 
 // admitLocked admits waiters from the head of the line while Claim takes
 // them. No demand is offered to Claim while another is ahead of it in line.
-func (l *Gate[D]) admitLocked() {
+func (g *Gate[D]) admitLocked() {
 	for {
-		w, ok := l.waiters.front()
-		if !ok || !l.claim(w.d) {
+		w, ok := g.waiters.front()
+		if !ok || !g.claim(w.d) {
 			return
 		}
-		l.waiters.pop(struct{}{}, nil)
+		g.waiters.pop(struct{}{}, nil)
 	}
 }
 
-func (l *Gate[D]) claim(d D) bool {
-	return l.Claim == nil || l.Claim(d)
+func (g *Gate[D]) claim(d D) bool {
+	return g.Claim == nil || g.Claim(d)
 }
 
-func (l *Gate[D]) release(d D) {
-	if l.Release != nil {
-		l.Release(d)
+func (g *Gate[D]) release(d D) {
+	if g.Release != nil {
+		g.Release(d)
 	}
 }
