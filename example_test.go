@@ -30,6 +30,47 @@ func ExampleList() {
 	// using conn-b
 }
 
+// A connection that fails a health check is retired instead of released.
+// The deferred Release then does nothing, and the List creates a
+// replacement for the next caller.
+func ExampleTicket_Retire() {
+	n := 0
+	conns := &wait.List[string]{
+		MaxItems: 1,
+		New: func() string {
+			n++
+			return fmt.Sprintf("conn-%d", n)
+		},
+	}
+
+	query := func(healthy bool) error {
+		t := conns.Take(context.Background())
+		defer t.Release()
+		c, err := t.Value()
+		if err != nil {
+			return err
+		}
+		fmt.Println("using", c)
+		if !healthy {
+			t.Retire()
+			return fmt.Errorf("%s: broken", c)
+		}
+		return nil
+	}
+
+	if err := query(false); err != nil {
+		fmt.Println("error:", err)
+	}
+	if err := query(true); err != nil {
+		fmt.Println("error:", err)
+	}
+
+	// Output:
+	// using conn-1
+	// error: conn-1: broken
+	// using conn-2
+}
+
 // A Gate over a budget of 10 bytes. Each admitted request holds its bytes
 // until it releases its Ticket.
 func ExampleGate() {
