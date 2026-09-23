@@ -191,10 +191,8 @@ func TestListSkipsCanceledValue(t *testing.T) {
 
 		cancel()
 		synctest.Wait()
-		if tk, ok := l.TryTake(); !ok {
-			t.Error("TryTake() = false, want the released item")
-		} else if v, _ := tk.Value(); v != 42 {
-			t.Errorf("TryTake().Value() = %d, want 42", v)
+		if v, err := l.Take(done).Value(); v != 42 || err != nil {
+			t.Errorf("Take(done).Value() = %d, %v, want the released item 42, nil", v, err)
 		}
 	})
 }
@@ -343,12 +341,13 @@ func TestListClose(t *testing.T) {
 			t.Error("Add(999) after Close = true, want false")
 		}
 		for {
-			tk, ok := l.TryTake()
-			if !ok {
+			tk := l.Take(done)
+			v, err := tk.Value()
+			if err != nil {
 				break
 			}
-			if v, _ := tk.Value(); v < 0 || v > 4 {
-				t.Errorf("TryTake after Close = %d, want 0 through 4", v)
+			if v < 0 || v > 4 {
+				t.Errorf("Take(done) after Close = %d, want 0 through 4", v)
 			}
 			tk.Retire()
 		}
@@ -425,10 +424,8 @@ func TestListClose(t *testing.T) {
 
 		// A released item stays drainable, so its owner can dispose of it.
 		tk.Release()
-		if tk, ok := l.TryTake(); !ok {
-			t.Error("TryTake() = false, want the released item")
-		} else if v, _ := tk.Value(); v != 5 {
-			t.Errorf("TryTake().Value() = %d, want 5", v)
+		if v, err := l.Take(done).Value(); v != 5 || err != nil {
+			t.Errorf("Take(done).Value() = %d, %v, want the released item 5, nil", v, err)
 		}
 	})
 

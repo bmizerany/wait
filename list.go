@@ -82,6 +82,10 @@ type List[Item any] struct {
 // after Close like a channel. Otherwise the Ticket waits in line, and Take
 // starts creating an item if MaxItems allows. Take never blocks; the
 // Ticket's Value waits.
+//
+// To take only a ready item, pass a ctx that is already done: the Ticket
+// then holds a ready item or fails with ctx's cause, without joining the
+// line or creating an item.
 func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -103,18 +107,6 @@ func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 	return t
 }
 
-// TryTake returns a Ticket holding the next ready item, if any. It never
-// waits or creates an item.
-func (l *List[T]) TryTake() (Ticket[T], bool) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	v, ok := l.ready.Pop()
-	if !ok {
-		return Ticket[T]{}, false
-	}
-	return l.waiters.ticket(l, v), true
-}
-
 // Add adds v to the List as a new item. It hands v to the longest-waiting
 // Ticket, or stores it for later. Add returns false after [List.Close].
 // To give back an item taken from the List, release its Ticket instead.
@@ -129,8 +121,8 @@ func (l *List[T]) Add(v T) bool {
 }
 
 // Close fails waiting Tickets with [ErrClosed]. Ready items can still be
-// drained with [List.Take] or [List.TryTake], and items given back by
-// releasing their Tickets after Close join them. Later [List.Add] calls
+// drained with [List.Take], and items given back by releasing their
+// Tickets after Close join them. Later [List.Add] calls
 // return false. Close is idempotent.
 func (l *List[T]) Close() {
 	l.mu.Lock()

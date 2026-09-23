@@ -8,18 +8,25 @@ import (
 	"testing/synctest"
 )
 
+// done is already done, so Take with it takes only what is available at once.
+var done = func() context.Context {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return ctx
+}()
+
 func TestTicketReleaseTwice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g, free := testGate(2)
 
-		tk, ok := g.TryTake(2)
-		if !ok {
-			t.Fatal("TryTake(2) = false, want true")
+		tk := g.Take(done, 2)
+		if _, err := tk.Value(); err != nil {
+			t.Fatal("Take(done, 2) not admitted, want admitted")
 		}
 		tk.Release()
 		tk.Release()
 		if got := free(); got != 2 {
-			t.Fatalf("free after TryTake release twice = %d, want 2", got)
+			t.Fatalf("free after Take(done) release twice = %d, want 2", got)
 		}
 
 		tk = held(t, g.Take(t.Context(), 2))
@@ -43,8 +50,8 @@ func TestTicketReleaseTwiceList(t *testing.T) {
 	tk.Release() // must not store item 1 twice
 
 	held(t, l.Take(context.Background()))
-	if _, ok := l.TryTake(); ok {
-		t.Fatal("TryTake() = true, want false (item 1 stored twice)")
+	if _, err := l.Take(done).Value(); err == nil {
+		t.Fatal("Take(done) admitted, want false (item 1 stored twice)")
 	}
 }
 
@@ -87,10 +94,8 @@ func TestTicketZero(t *testing.T) {
 func TestTicketFailed(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g, free := testGate(1)
-		ctx, cancel := context.WithCancel(t.Context())
-		cancel()
 
-		tk := g.Take(ctx, 1)
+		tk := g.Take(done, 2) // does not fit, so it fails at once
 		if !tk.Ready() {
 			t.Error("Ready() = false, want true")
 		}
@@ -154,8 +159,8 @@ func TestTicketRetireList(t *testing.T) {
 			t.Fatalf("waiter.Value() = %d, %v, want 2, nil", v, err)
 		}
 		tk.Release() // must not bring item 1 back
-		if _, ok := l.TryTake(); ok {
-			t.Fatal("TryTake() = true after Retire then Release, want false")
+		if _, err := l.Take(done).Value(); err == nil {
+			t.Fatal("Take(done) admitted after Retire then Release, want false")
 		}
 		if got := loads.Load(); got != 2 {
 			t.Fatalf("New calls = %d, want 2", got)
@@ -174,12 +179,8 @@ func TestTicketReleaseThenRetire(t *testing.T) {
 		tk.Release()
 		tk.Retire() // must not drop item 1 or free its place
 
-		kept, ok := l.TryTake()
-		if !ok {
-			t.Fatal("TryTake() = false, want item 1 back after Release")
-		}
-		if v, _ := kept.Value(); v != 1 {
-			t.Fatalf("TryTake().Value() = %d, want 1", v)
+		if v, err := l.Take(done).Value(); v != 1 || err != nil {
+			t.Fatalf("Take(done).Value() = %d, %v, want item 1 back after Release", v, err)
 		}
 		next := l.Take(t.Context())
 		synctest.Wait() // let any wrongly started New run

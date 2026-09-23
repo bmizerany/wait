@@ -33,16 +33,18 @@ type Gate[D any] struct {
 }
 
 // Take returns a Ticket for demand d. If no one is waiting and Claim takes
-// d, the Ticket is admitted already; otherwise it waits in line. Take
-// never blocks; the Ticket's Value waits, and returns d once admitted.
+// d, the Ticket is admitted already, even if ctx is done; otherwise it
+// waits in line. Take never blocks; the Ticket's Value waits, and returns
+// d once admitted.
+//
+// To admit d only if it fits now, pass a ctx that is already done: the
+// Ticket is then admitted at once or fails with ctx's cause, without
+// joining the line.
 func (g *Gate[D]) Take(ctx context.Context, d D) Ticket[D] {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
 		return Ticket[D]{err: ErrClosed}
-	}
-	if ctx.Err() != nil {
-		return Ticket[D]{err: context.Cause(ctx)}
 	}
 	if g.waiters.q.Len() > 0 {
 		// Canceled waiters may still be in line, holding up the head.
@@ -51,31 +53,16 @@ func (g *Gate[D]) Take(ctx context.Context, d D) Ticket[D] {
 	if g.waiters.q.Len() == 0 && g.claim(d) {
 		return g.waiters.ticket(g, d)
 	}
+	if ctx.Err() != nil {
+		return Ticket[D]{err: context.Cause(ctx)}
+	}
 	t, _ := g.waiters.join(g, ctx, d, 0)
 	return t
 }
 
-// TryTake returns an admitted Ticket for d, and true, only when no one is
-// waiting and Claim takes d. It returns the zero Ticket and false when d
-// cannot be admitted at once or after [Gate.Close].
-func (g *Gate[D]) TryTake(d D) (Ticket[D], bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.closed {
-		return Ticket[D]{}, false
-	}
-	if g.waiters.q.Len() > 0 {
-		g.admitLocked()
-	}
-	if g.waiters.q.Len() > 0 || !g.claim(d) {
-		return Ticket[D]{}, false
-	}
-	return g.waiters.ticket(g, d), true
-}
-
 // Close fails waiting Tickets with [ErrClosed]. Later [Gate.Take] calls
-// return failed Tickets, and [Gate.TryTake] returns false. Releasing a
-// Ticket after Close still gives its capacity back. Close is idempotent.
+// return failed Tickets. Releasing a Ticket after Close still gives its
+// capacity back. Close is idempotent.
 func (g *Gate[D]) Close() {
 	g.mu.Lock()
 	defer g.mu.Unlock()

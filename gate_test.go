@@ -81,9 +81,9 @@ func TestGateZeroValue(t *testing.T) {
 			tk := held(t, g.Take(t.Context(), "anything"))
 			tk.Release()
 		}
-		tk, ok := g.TryTake("more")
-		if !ok {
-			t.Fatal("TryTake = false, want true")
+		tk := g.Take(done, "more")
+		if _, err := tk.Value(); err != nil {
+			t.Fatal("Take(done) not admitted, want admitted")
 		}
 		tk.Release()
 	})
@@ -174,39 +174,39 @@ func TestGateCascade(t *testing.T) {
 	})
 }
 
-func TestGateTryTake(t *testing.T) {
+func TestGateTakeDone(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		g, free := testGate(4)
 
-		// Empty line: TryTake admits what fits.
-		tk, ok := g.TryTake(3)
-		if !ok {
-			t.Fatal("TryTake(3) = false, want true")
+		// Empty line: Take with a done ctx admits what fits now.
+		tk := g.Take(done, 3)
+		if _, err := tk.Value(); err != nil {
+			t.Fatal("Take(done, 3) not admitted, want admitted")
 		}
-		if _, ok := g.TryTake(2); ok {
-			t.Fatal("TryTake(2) = true, want false (only 1 free)")
+		if _, err := g.Take(done, 2).Value(); err == nil {
+			t.Fatal("Take(done, 2) admitted, want not (only 1 free)")
 		}
 
-		// A waiter joins the line. TryTake must decline even though
-		// its demand fits: it never cuts the line.
+		// A waiter joins the line. Take(done) must fail even though its
+		// demand fits: it never cuts the line, and never joins it.
 		go func() {
 			if _, err := g.Take(t.Context(), 2).Value(); err != nil {
 				t.Errorf("Take(2) = %v, want nil", err)
 			}
 		}()
 		synctest.Wait()
-		if _, ok := g.TryTake(1); ok {
-			t.Fatal("TryTake(1) = true, want false (a waiter is in line)")
+		if _, err := g.Take(done, 1).Value(); err == nil {
+			t.Fatal("Take(done, 1) admitted, want not (a waiter is in line)")
 		}
 
-		// The waiter admits and the line empties; TryTake works again.
+		// The waiter admits and the line empties; Take(done) works again.
 		tk.Release()
 		synctest.Wait()
 		if got := free(); got != 2 {
 			t.Fatalf("free = %d, want 2", got)
 		}
-		if _, ok := g.TryTake(2); !ok {
-			t.Fatal("TryTake(2) = false, want true")
+		if _, err := g.Take(done, 2).Value(); err != nil {
+			t.Fatal("Take(done, 2) not admitted, want admitted")
 		}
 	})
 }
@@ -216,10 +216,8 @@ func TestGateTakeCancel(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			g, free := testGate(1)
 
-			ctx, cancel := context.WithCancel(t.Context())
-			cancel()
-
-			if _, err := g.Take(ctx, 1).Value(); !errors.Is(err, context.Canceled) {
+			// 2 does not fit, so the done ctx wins and nothing is claimed.
+			if _, err := g.Take(done, 2).Value(); !errors.Is(err, context.Canceled) {
 				t.Errorf("err = %v, want context.Canceled", err)
 			}
 			if got := free(); got != 1 {
@@ -252,8 +250,8 @@ func TestGateTakeCancel(t *testing.T) {
 			if got := free(); got != 1 {
 				t.Fatalf("free = %d, want 1", got)
 			}
-			if _, ok := g.TryTake(1); !ok {
-				t.Fatal("TryTake(1) = false, want true (line should be empty)")
+			if _, err := g.Take(done, 1).Value(); err != nil {
+				t.Fatal("Take(done, 1) not admitted, want admitted (line should be empty)")
 			}
 		})
 	})
@@ -376,8 +374,8 @@ func TestGateSkipsCanceled(t *testing.T) {
 		if got := free(); got != 1 {
 			t.Fatalf("free = %d, want 1", got)
 		}
-		if _, ok := g.TryTake(1); !ok {
-			t.Fatal("TryTake(1) = false, want true (line should be empty)")
+		if _, err := g.Take(done, 1).Value(); err != nil {
+			t.Fatal("Take(done, 1) not admitted, want admitted (line should be empty)")
 		}
 	})
 }
@@ -451,8 +449,8 @@ func TestGateClose(t *testing.T) {
 			if _, err := g.Take(t.Context(), 1).Value(); !errors.Is(err, ErrClosed) {
 				t.Errorf("Take err = %v, want ErrClosed", err)
 			}
-			if _, ok := g.TryTake(1); ok {
-				t.Error("TryTake after Close = true, want false")
+			if _, err := g.Take(done, 1).Value(); err == nil {
+				t.Error("Take(done) after Close admitted, want ErrClosed")
 			}
 		})
 	})

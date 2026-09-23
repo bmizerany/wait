@@ -90,20 +90,26 @@ func ExampleGate() {
 	if _, err := tk.Value(); err != nil {
 		log.Fatal(err)
 	}
-	if _, ok := g.TryTake(4); !ok {
+
+	// A ctx that is already done asks only for what fits now.
+	now, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := g.Take(now, 4).Value(); err != nil {
 		fmt.Println("4 does not fit beside 8")
 	}
 
 	tk.Release()
 	tk.Release() // no effect: the 8 bytes come back once
 
-	if _, ok := g.TryTake(11); !ok {
+	if _, err := g.Take(now, 11).Value(); err != nil {
 		fmt.Println("11 does not fit in 10")
 	}
-	if tk, ok := g.TryTake(10); ok {
+	tk = g.Take(now, 10)
+	if _, err := tk.Value(); err == nil {
 		fmt.Println("10 fits")
-		tk.Release()
 	}
+	tk.Release()
 
 	// Output:
 	// 4 does not fit beside 8
