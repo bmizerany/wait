@@ -8,8 +8,30 @@ import (
 	"blake.io/wait"
 )
 
+// A List of two connections. A released connection is the next one
+// taken, while it is still warm.
+func ExampleList() {
+	var conns wait.List[string]
+	conns.Add("conn-a")
+	conns.Add("conn-b")
+
+	for range 2 {
+		t := conns.Take(context.Background())
+		c, err := t.Value()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("using", c)
+		t.Release()
+	}
+
+	// Output:
+	// using conn-b
+	// using conn-b
+}
+
 // A Gate over a budget of 10 bytes. Each admitted request holds its bytes
-// until it releases the Grant that Wait or TryWait returned.
+// until it releases its Ticket.
 func ExampleGate() {
 	budget := 10
 	g := &wait.Gate[int]{
@@ -23,23 +45,23 @@ func ExampleGate() {
 		Release: func(n int) { budget += n },
 	}
 
-	grant, err := g.Wait(context.Background(), 8)
-	if err != nil {
+	tk := g.Take(context.Background(), 8)
+	if _, err := tk.Value(); err != nil {
 		log.Fatal(err)
 	}
-	if _, ok := g.TryWait(4); !ok {
+	if _, ok := g.TryTake(4); !ok {
 		fmt.Println("4 does not fit beside 8")
 	}
 
-	grant.Release()
-	grant.Release() // no effect: the 8 bytes come back once
+	tk.Release()
+	tk.Release() // no effect: the 8 bytes come back once
 
-	if _, ok := g.TryWait(11); !ok {
+	if _, ok := g.TryTake(11); !ok {
 		fmt.Println("11 does not fit in 10")
 	}
-	if grant, ok := g.TryWait(10); ok {
+	if tk, ok := g.TryTake(10); ok {
 		fmt.Println("10 fits")
-		grant.Release()
+		tk.Release()
 	}
 
 	// Output:
