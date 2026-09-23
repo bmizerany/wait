@@ -22,10 +22,9 @@ type Gate[D any] struct {
 	Claim func(d D) bool
 
 	// Release gives back the capacity a successful Claim(d) took. The Gate
-	// calls it with its lock held, from Put and when a canceled Wait turns
-	// out to have been admitted, and then admits waiters that now fit.
-	// Release must not block or call back into the Gate. A nil Release
-	// does nothing.
+	// calls Release at most once for each successful Claim, with its lock
+	// held, and then admits waiters that now fit. Release must not block
+	// or call back into the Gate. A nil Release does nothing.
 	Release func(d D)
 
 	mu      sync.Mutex // guards waiters and closed
@@ -34,31 +33,38 @@ type Gate[D any] struct {
 }
 
 // Wait queues d until it is admitted, ctx is done, or the Gate is closed.
+// Once d is admitted, Wait returns a release function that gives d's
+// capacity back. Only the first call to release has any effect, and
+// release works after Close. The caller must call release, or d holds
+// its capacity forever.
 //
 // If the line is empty and Claim takes d, Wait returns at once. Wait
 // returns [ErrClosed] if the Gate is closed and the context cause if ctx
 // is done first. A Wait that returns an error holds nothing: if d was
 // admitted as ctx was canceled, Wait releases it before returning.
-func (g *Gate[D]) Wait(ctx context.Context, d D) error {
+func (g *Gate[D]) Wait(ctx context.Context, d D) (release func(), err error) {
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
-		return ErrClosed
+		return nil, ErrClosed
 	}
 	if ctx.Err() != nil {
 		g.mu.Unlock()
-		return context.Cause(ctx)
+		return nil, context.Cause(ctx)
 	}
 	if _, ok := g.waiters.front(); !ok && g.claim(d) {
 		g.mu.Unlock()
-		return nil
+		return g.releaser(d), nil
 	}
 	w, _ := g.waiters.join(ctx, d, nil, 0)
 	g.mu.Unlock()
 
 	r, canceled := g.waiters.wait(&g.mu, w)
 	if !canceled {
-		return r.err
+		if r.err != nil {
+			return nil, r.err
+		}
+		return g.releaser(d), nil
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -69,28 +75,36 @@ func (g *Gate[D]) Wait(ctx context.Context, d D) error {
 	}
 	// w may have been the head; its successor may fit now.
 	g.admitLocked()
-	return context.Cause(ctx)
+	return nil, context.Cause(ctx)
 }
 
-// TryWait admits d only when no one is waiting and Claim takes it. It
-// returns false when d cannot be admitted or after [Gate.Close].
-func (g *Gate[D]) TryWait(d D) bool {
+// TryWait admits d only when no one is waiting and Claim takes it. On
+// admission it returns a release function, as [Gate.Wait] does, and true.
+// It returns nil and false when d cannot be admitted or after
+// [Gate.Close].
+func (g *Gate[D]) TryWait(d D) (release func(), ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if _, ok := g.waiters.front(); g.closed || ok {
-		return false
+	if _, queued := g.waiters.front(); g.closed || queued || !g.claim(d) {
+		return nil, false
 	}
-	return g.claim(d)
+	return g.releaser(d), true
 }
 
-// Put gives back d's capacity through Release, then admits waiters from
-// the front of the line while Claim takes them. Put may admit several
-// waiters and works after Close.
-func (g *Gate[D]) Put(d D) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.release(d)
-	g.admitLocked()
+// releaser returns the release function for an admitted d. Only its first
+// call reaches Release: a second would credit capacity no Claim took.
+func (g *Gate[D]) releaser(d D) func() {
+	released := false // guarded by g.mu
+	return func() {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		if released {
+			return
+		}
+		released = true
+		g.release(d)
+		g.admitLocked()
+	}
 }
 
 // Close wakes queued callers. Later [Gate.Wait] calls return [ErrClosed], and
