@@ -2,21 +2,24 @@
 
 [![Go Reference](https://pkg.go.dev/badge/blake.io/wait.svg)](https://pkg.go.dev/blake.io/wait)
 
-Package `wait` coordinates access to scarce resources when both a hard limit
-and fair service matter. It is useful for connection pools, device handles,
-worker capacity, and API quotas: callers wait in arrival order instead of
-creating beyond a limit or repeatedly racing for the next available resource.
+Package `wait` controls access to scarce things like connections, device
+handles, worker capacity, and API quota, when you need both a hard limit and
+fair service. Callers wait their turn in the order they arrived. Nobody creates
+past the limit, and nobody keeps racing for whatever comes back next.
 
-`wait.List` pools reusable items supplied with `Put` and can create more
-lazily up to `MaxItems`. It serves queued callers in FIFO order. `MaxWaiters`
-caps the queue; contexts let callers cancel pending work or bound their wait
-with a deadline. `wait.Gate` owns no resources and orders admission against
-capacity tracked by the caller. Its strict arrival order can leave smaller
-requests waiting behind a larger one.
+`wait.List` is a pool. You add items with `Put`, and it can create more lazily,
+up to `MaxItems`. Waiting callers get items in arrival order. Idle items sit in
+a LIFO stack, so the next caller gets the most recently used one, which is the
+likeliest to still be warm. `MaxWaiters` caps how many callers can wait, and a
+context lets a caller give up or wait only until a deadline.
 
-Use a buffered channel when a hard creation limit and FIFO service are not
-needed. Use `sync.Pool` for temporary allocation reuse; it does not bound
-resource creation or order callers.
+`wait.Gate` holds nothing. It lines up requests against capacity you keep track
+of yourself. It admits strictly in arrival order, so a large request at the
+front can hold up smaller ones behind it.
 
-See the [package documentation](https://pkg.go.dev/blake.io/wait) for API
-details and examples.
+If you don't need a hard limit on creation or first-come service, a buffered
+channel is simpler. `sync.Pool` is for reusing temporary allocations; it
+doesn't limit how many resources exist, and it doesn't order callers.
+
+API details and examples are in the
+[package documentation](https://pkg.go.dev/blake.io/wait).
