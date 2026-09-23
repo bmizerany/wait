@@ -360,17 +360,17 @@ func TestWaitListClose(t *testing.T) {
 
 // TestTakeNearMiss tests the near-miss scenario where a value arrives
 // just as the context is being canceled. This test uses the internal
-// testHookWaiterCanceled field to reliably induce the race condition.
+// testHookCanceled field to reliably induce the race condition.
 func TestTakeNearMiss(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		p := &List[int]{
 			MaxItems:   1,
 			MaxWaiters: 10,
 			New:        func() int { return 42 },
-
-			// induce near miss
-			testHookWaiterCanceled: func(ch chan int) { ch <- 42 },
 		}
+		// Induce the near miss: hand the canceling waiter a value the
+		// instant it begins handling its cancellation.
+		p.waiters.testHookCanceled = func() { p.Put(42) }
 
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()

@@ -3,8 +3,6 @@ package wait
 import (
 	"context"
 	"sync"
-
-	"blake.io/wait/queue"
 )
 
 // A Gate orders access to capacity tracked by the caller.
@@ -26,36 +24,9 @@ type Gate[D any] struct {
 	// block or call back into the Gate. A nil Refill does nothing.
 	Refill func(d D)
 
-	mu      sync.Mutex
-	waiters queue.Fifo[*gateWaiter[D]]
+	mu      sync.Mutex // guards waiters and closed
+	waiters line[D, struct{}]
 	closed  bool
-
-	chanPool sync.Pool // of chan error
-
-	testHookGateWaiterCanceled func() // runs at the top of handleCancel
-}
-
-// A gateWaiter's channel receives exactly one signal — nil for
-// admitted, ErrClosed for closed — sent while holding the Gate's lock,
-// in the same critical section that pops the waiter from the line.
-// Cancellation deletes the waiter under the same lock, so a waiter is
-// popped or deleted, never both, and a canceled waiter that finds
-// itself already popped knows its signal has already arrived. Every
-// channel is therefore drained before returning to the pool.
-type gateWaiter[D any] struct {
-	d  D
-	ch chan error
-}
-
-// signal hands w its one signal. Callers hold the Gate's lock and pop
-// w from the line in the same critical section, so the channel has
-// room; a full channel means the gateWaiter invariant was broken.
-func (w *gateWaiter[D]) signal(err error) {
-	select {
-	case w.ch <- err:
-	default:
-		panic("wait: gate waiter signaled twice (this is a bug in Gate)")
-	}
 }
 
 // Wait queues d until it is admitted, ctx is done, or the Gate is closed.
@@ -74,28 +45,27 @@ func (l *Gate[D]) Wait(ctx context.Context, d D) error {
 		l.mu.Unlock()
 		return context.Cause(ctx)
 	}
-	if l.waiters.Len() == 0 && l.fill(d) {
+	if _, ok := l.waiters.front(); !ok && l.fill(d) {
 		l.mu.Unlock()
 		return nil
 	}
-
-	ch, _ := l.chanPool.Get().(chan error)
-	if ch == nil {
-		ch = make(chan error, 1)
-	}
-	w := &gateWaiter[D]{d: d, ch: ch}
-	l.waiters.Unshift(w)
+	w, _ := l.waiters.join(ctx, d, nil, 0)
 	l.mu.Unlock()
 
-	select {
-	case err := <-w.ch:
-		l.chanPool.Put(w.ch)
-		return err
-	case <-ctx.Done():
-		err := l.handleCancel(w, context.Cause(ctx))
-		l.chanPool.Put(w.ch)
-		return err
+	r, canceled := l.waiters.wait(&l.mu, w)
+	if !canceled {
+		return r.err
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if r.err == nil {
+		// Admitted just as we were canceling: refund, so a canceled
+		// Wait holds nothing.
+		l.refill(d)
+	}
+	// w may have been the head; its successor may fit now.
+	l.admitLocked()
+	return context.Cause(ctx)
 }
 
 // TryWait admits d only when no one is waiting and Fill accepts it. It
@@ -103,7 +73,7 @@ func (l *Gate[D]) Wait(ctx context.Context, d D) error {
 func (l *Gate[D]) TryWait(d D) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed || l.waiters.Len() > 0 {
+	if _, ok := l.waiters.front(); l.closed || ok {
 		return false
 	}
 	return l.fill(d)
@@ -123,69 +93,19 @@ func (l *Gate[D]) Put(d D) {
 func (l *Gate[D]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.closed {
-		return
-	}
 	l.closed = true
-	for {
-		w, ok := l.waiters.Shift()
-		if !ok {
-			return
-		}
-		w.signal(ErrClosed)
-	}
+	l.waiters.close()
 }
 
-// handleCancel removes w from the line and returns cause. If w is
-// already gone from the line, it was popped and signaled (see
-// gateWaiter): an ErrClosed signal needs nothing back, but an
-// admission that raced the cancellation is refunded so the caller can
-// trust that a canceled Wait holds nothing.
-func (l *Gate[D]) handleCancel(w *gateWaiter[D], cause error) error {
-	if l.testHookGateWaiterCanceled != nil {
-		l.testHookGateWaiterCanceled()
-	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	head, _ := l.waiters.Front()
-	n := l.waiters.Len()
-	l.waiters.DeleteFunc(func(queued *gateWaiter[D]) bool {
-		return w == queued
-	})
-	if l.waiters.Len() < n {
-		if head == w {
-			// w was the head; its successor may fit now.
-			l.admitLocked()
-		}
-		return cause
-	}
-
-	select {
-	case err := <-w.ch:
-		if err == nil {
-			// Near miss: admitted just as we were canceling.
-			l.refill(w.d)
-			l.admitLocked()
-		}
-	default:
-		panic("wait: gate waiter popped but never signaled (this is a bug in Gate)")
-	}
-	return cause
-}
-
-// admitLocked pops and admits waiters from the head of the line while
-// Fill accepts them. It upholds the Gate invariant: no demand is
-// offered to Fill while another is ahead of it in line.
+// admitLocked admits waiters from the head of the line while Fill accepts
+// them. No demand is offered to Fill while another is ahead of it in line.
 func (l *Gate[D]) admitLocked() {
 	for {
-		w, ok := l.waiters.Front()
+		w, ok := l.waiters.front()
 		if !ok || !l.fill(w.d) {
 			return
 		}
-		l.waiters.Shift()
-		w.signal(nil)
+		l.waiters.pop(struct{}{}, nil)
 	}
 }
 

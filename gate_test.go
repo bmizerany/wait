@@ -353,7 +353,7 @@ func TestGateWaitContextCancel(t *testing.T) {
 // arrives just as the context is being canceled. Unlike List, which
 // hands the raced value to the caller, a canceled Wait refunds the
 // raced grant and reports the cancellation. This test uses the
-// internal testHookGateWaiterCanceled field to reliably induce the
+// internal testHookCanceled field to reliably induce the
 // race condition.
 func TestGateNearMiss(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -361,7 +361,7 @@ func TestGateNearMiss(t *testing.T) {
 
 		// Induce the near miss: admit the canceling waiter the
 		// instant it begins handling its cancellation.
-		l.testHookGateWaiterCanceled = func() { l.Put(1) }
+		l.waiters.testHookCanceled = func() { l.Put(1) }
 
 		if err := l.Wait(t.Context(), 1); err != nil {
 			t.Fatal("draining:", err)

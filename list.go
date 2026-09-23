@@ -56,29 +56,19 @@ type List[Item any] struct {
 	// Zero means no limit.
 	MaxWaiters int
 
-	// readyMu guards the ready list and loads counter.
+	// readyMu guards ready and loads.
 	readyMu sync.Mutex
 	ready   queue.Lifo[Item] // LIFO stack of ready items
 	loads   int              // number of live items tracked by the list
 
-	// waitersMu guards waiters, their reservation state, and testHookWaiterCanceled.
-	waitersMu sync.Mutex
-	waiters   queue.Fifo[*waiter[Item]] // FIFO queue of waiters
-
-	chanPool sync.Pool
+	waitersMu sync.Mutex // guards waiters
+	waiters   line[listWaiter, Item]
 
 	closed atomic.Bool
-
-	testHookWaiterCanceled func(ch chan Item)
 }
 
-type waiter[T any] struct {
-	ch      chan T
-	future  *Future[T]
-	ctx     context.Context // non-nil for a reservation
-	stop    func() bool
-	done    bool // guarded by waitersMu
-	loading bool
+type listWaiter struct {
+	loading bool // an item is being created on this waiter's behalf
 }
 
 // Close wakes pending callers with [ErrClosed]. Callers can still drain ready
@@ -86,30 +76,11 @@ type waiter[T any] struct {
 // calls return false. Close is idempotent.
 func (p *List[T]) Close() {
 	if p.closed.Swap(true) {
-		// Already closed
 		return
 	}
-
 	p.waitersMu.Lock()
 	defer p.waitersMu.Unlock()
-
-	// Wake all waiters
-	for {
-		waiter, ok := p.waiters.Shift()
-		if !ok {
-			break
-		}
-		if waiter.future != nil {
-			var zero T
-			if waiter.ctx.Err() != nil {
-				p.finishFutureLocked(waiter, zero, context.Cause(waiter.ctx))
-			} else {
-				p.finishFutureLocked(waiter, zero, ErrClosed)
-			}
-		} else {
-			close(waiter.ch)
-		}
-	}
+	p.waiters.close()
 }
 
 // Reserve queues a request for an item and returns a [Future] for its result.
@@ -122,52 +93,23 @@ func (p *List[T]) Close() {
 // checkout; call Wait even after cancellation and return or retire any item
 // it returns.
 func (p *List[T]) Reserve(ctx context.Context) (*Future[T], error) {
+	f := newFuture[T]()
 	p.readyMu.Lock()
+	defer p.readyMu.Unlock()
 	if v, ok := p.ready.Pop(); ok {
-		p.readyMu.Unlock()
-		f := newFuture[T]()
 		f.resolve(v, nil)
 		return f, nil
 	}
-	if p.closed.Load() {
-		p.readyMu.Unlock()
-		return nil, ErrClosed
+	w, err := p.joinLocked(ctx, f)
+	if err != nil {
+		return nil, err
 	}
-	if err := ctx.Err(); err != nil {
-		p.readyMu.Unlock()
-		return nil, context.Cause(ctx)
-	}
-
-	p.waitersMu.Lock()
-	// Close may have started while we acquired waitersMu.
-	if p.closed.Load() {
-		p.waitersMu.Unlock()
-		p.readyMu.Unlock()
-		return nil, ErrClosed
-	}
-	if err := ctx.Err(); err != nil {
-		p.waitersMu.Unlock()
-		p.readyMu.Unlock()
-		return nil, context.Cause(ctx)
-	}
-	if p.MaxWaiters > 0 && p.waiters.Len() >= p.MaxWaiters {
-		p.removeCanceledFuturesLocked()
-		if p.waiters.Len() >= p.MaxWaiters {
-			p.waitersMu.Unlock()
-			p.readyMu.Unlock()
-			return nil, ErrMaxWaiters
-		}
-	}
-
-	f := newFuture[T]()
-	w := &waiter[T]{future: f, ctx: ctx}
-	p.waiters.Unshift(w)
-	w.stop = context.AfterFunc(ctx, func() { p.cancelFuture(w) })
-	if ctx.Err() == nil {
-		p.startNextLoadLocked()
-	}
+	w.stop = context.AfterFunc(ctx, func() {
+		p.waitersMu.Lock()
+		defer p.waitersMu.Unlock()
+		p.waiters.cancel(w)
+	})
 	p.waitersMu.Unlock()
-	p.readyMu.Unlock()
 	return f, nil
 }
 
@@ -181,73 +123,50 @@ func (p *List[T]) Take(ctx context.Context) (T, error) {
 	var zero T
 
 	p.readyMu.Lock()
-
-	// Check for ready item first, even if closed or context done.
-	// This allows draining ready items after close, like a channel.
+	// A ready item wins even if the List is closed or ctx is done,
+	// so ready items drain after Close, like a channel.
 	if v, ok := p.ready.Pop(); ok {
 		p.readyMu.Unlock()
 		return v, nil
 	}
+	w, err := p.joinLocked(ctx, nil)
+	p.readyMu.Unlock()
+	if err != nil {
+		return zero, err
+	}
+	p.waitersMu.Unlock()
 
-	// No ready items available. Check if we should proceed to wait.
+	// A value that beats cancellation is the caller's, not an error.
+	r, _ := p.waiters.wait(&p.waitersMu, w)
+	return r.v, r.err
+}
+
+// joinLocked puts a new waiter at the end of the line and starts a load for
+// it if the List may create one. The caller holds readyMu. On success,
+// joinLocked returns with waitersMu held, so the caller can finish setting
+// up the waiter before anything delivers to it.
+func (p *List[T]) joinLocked(ctx context.Context, f *Future[T]) (*waiter[listWaiter, T], error) {
 	if p.closed.Load() {
-		p.readyMu.Unlock()
-		return zero, ErrClosed
+		return nil, ErrClosed
 	}
-
 	if ctx.Err() != nil {
-		p.readyMu.Unlock()
-		return zero, context.Cause(ctx)
+		return nil, context.Cause(ctx)
 	}
-
 	p.waitersMu.Lock()
-
-	// Check MaxWaiters limit
+	// Close may have started while we acquired waitersMu.
 	if p.closed.Load() {
 		p.waitersMu.Unlock()
-		p.readyMu.Unlock()
-		return zero, ErrClosed
+		return nil, ErrClosed
 	}
-	if p.MaxWaiters > 0 && p.waiters.Len() >= p.MaxWaiters {
-		p.removeCanceledFuturesLocked()
-		if p.waiters.Len() >= p.MaxWaiters {
-			p.waitersMu.Unlock()
-			p.readyMu.Unlock()
-			return zero, ErrMaxWaiters
-		}
+	w, err := p.waiters.join(ctx, listWaiter{}, f, p.MaxWaiters)
+	if err != nil {
+		p.waitersMu.Unlock()
+		return nil, err
 	}
-
-	// Get in line before we start any loading to ensure FIFO order.
-	ch, _ := p.chanPool.Get().(chan T)
-	if ch == nil {
-		ch = make(chan T, 1)
-	}
-	waiter := &waiter[T]{
-		ch: ch,
-	}
-	p.waiters.Unshift(waiter)
-
 	if ctx.Err() == nil {
 		p.startNextLoadLocked()
 	}
-
-	p.waitersMu.Unlock()
-	p.readyMu.Unlock()
-
-	// Wait for value or context cancellation
-	select {
-	case v, ok := <-waiter.ch:
-		p.chanPool.Put(waiter.ch)
-		if !ok {
-			return zero, ErrClosed
-		}
-		return v, nil
-	case <-ctx.Done():
-		err := context.Cause(ctx)
-		v, err := p.handleCancel(waiter, err)
-		p.chanPool.Put(waiter.ch)
-		return v, err
-	}
+	return w, nil
 }
 
 // TryTake returns the next ready item, if any. It never waits or creates an
@@ -265,55 +184,44 @@ func (p *List[T]) Put(v T) (accepted bool) {
 		return false
 	}
 
-	maybeHandoff := func(v T) bool {
-		p.waitersMu.Lock()
-		defer p.waitersMu.Unlock()
-		for {
-			waiter, ok := p.waiters.Shift()
-			if !ok {
-				return false
-			}
-			if waiter.future != nil {
-				if waiter.ctx.Err() != nil {
-					var zero T
-					p.finishFutureLocked(waiter, zero, context.Cause(waiter.ctx))
-					continue
-				}
-				p.finishFutureLocked(waiter, v, nil)
-				return true
-			}
-			select {
-			case waiter.ch <- v:
-			default:
-				panic("waiter: waiter channel full (this is a bug in waitlist)")
-			}
-			return true
-		}
-	}
-
 	// Attempt a handoff without locking readyMu to fast-path high-load
 	// cases.
-	if maybeHandoff(v) {
+	if p.handoff(v) {
 		return true
 	}
 
 	p.readyMu.Lock()
-	// If closed while acquiring readyMu, bail.
+	defer p.readyMu.Unlock()
 	if p.closed.Load() {
-		p.readyMu.Unlock()
 		return false
 	}
-
-	// We may have accumulated waiters while waiting for readyMu.
-	// Handoff to one if so.
-	if maybeHandoff(v) {
-		p.readyMu.Unlock()
+	// Waiters may have arrived while we acquired readyMu.
+	if p.handoff(v) {
 		return true
 	}
-
 	p.ready.Push(v)
-	p.readyMu.Unlock()
 	return true
+}
+
+// handoff gives v to the first waiter that can take it and reports whether
+// there was one. A canceled reservation cannot: its caller may never call
+// Wait, so handoff finishes it with its cause and moves on. A canceled Take
+// can; it returns v instead of the cause.
+func (p *List[T]) handoff(v T) bool {
+	p.waitersMu.Lock()
+	defer p.waitersMu.Unlock()
+	for {
+		w, ok := p.waiters.front()
+		if !ok {
+			return false
+		}
+		if w.future == nil || w.ctx.Err() == nil {
+			p.waiters.pop(v, nil)
+			return true
+		}
+		var zero T
+		p.waiters.pop(zero, context.Cause(w.ctx))
+	}
 }
 
 // Retire removes one checked-out item from the live item count. If the List
@@ -338,73 +246,6 @@ func (p *List[T]) Retire() {
 	p.startNextLoadLocked()
 }
 
-// handleCancel removes the given waiter from the waiters list and returns
-// errUnlessMissed unless a near-miss occurred and a value is available on the
-// waiter channel, in which case it returns that value and nil error.
-func (p *List[T]) handleCancel(w *waiter[T], errUnlessMissed error) (T, error) {
-	var zero T
-
-	if p.testHookWaiterCanceled != nil {
-		p.testHookWaiterCanceled(w.ch)
-	}
-
-	p.waitersMu.Lock()
-	p.waiters.DeleteFunc(func(queued *waiter[T]) bool {
-		return w == queued
-	})
-	p.waitersMu.Unlock()
-
-	select {
-	case v, ok := <-w.ch:
-		// Near miss: a value arrived just as we were canceling.
-		// Return it instead of the error.
-		if ok {
-			return v, nil
-		}
-	default:
-	}
-	return zero, errUnlessMissed
-}
-
-// finishFutureLocked resolves a reservation. The waiter has already been
-// removed from the queue, or is about to be removed by DeleteFunc.
-func (p *List[T]) finishFutureLocked(w *waiter[T], v T, err error) {
-	if w.done {
-		return
-	}
-	w.done = true
-	if w.stop != nil {
-		w.stop()
-	}
-	w.ctx = nil
-	w.future.resolve(v, err)
-}
-
-func (p *List[T]) cancelFuture(w *waiter[T]) {
-	p.waitersMu.Lock()
-	defer p.waitersMu.Unlock()
-	if w.done {
-		return
-	}
-	err := context.Cause(w.ctx)
-	p.waiters.DeleteFunc(func(queued *waiter[T]) bool { return queued == w })
-	var zero T
-	p.finishFutureLocked(w, zero, err)
-}
-
-// removeCanceledFuturesLocked frees capacity even if cancellation callbacks
-// have not yet run.
-func (p *List[T]) removeCanceledFuturesLocked() {
-	p.waiters.DeleteFunc(func(w *waiter[T]) bool {
-		if w.future == nil || w.ctx.Err() == nil {
-			return false
-		}
-		var zero T
-		p.finishFutureLocked(w, zero, context.Cause(w.ctx))
-		return true
-	})
-}
-
 func normalizeNew[T any](new func() T) func() T {
 	if new != nil {
 		return new
@@ -421,7 +262,7 @@ func (p *List[T]) startNextLoadLocked() {
 	if waiter == nil {
 		return
 	}
-	waiter.loading = true
+	waiter.d.loading = true
 	p.loads++
 	newItem := normalizeNew(p.New)
 	go func() { p.Put(newItem()) }()
@@ -433,9 +274,9 @@ func (p *List[T]) canLoadLocked() bool {
 
 // nextWaiterToLoadLocked returns the next waiter that is not already loading
 // an item, or nil if none.
-func (p *List[T]) nextWaiterToLoadLocked() *waiter[T] {
-	for waiter := range p.waiters.Values() {
-		if !waiter.loading && (waiter.future == nil || waiter.ctx.Err() == nil) {
+func (p *List[T]) nextWaiterToLoadLocked() *waiter[listWaiter, T] {
+	for waiter := range p.waiters.q.Values() {
+		if !waiter.d.loading && (waiter.future == nil || waiter.ctx.Err() == nil) {
 			return waiter
 		}
 	}

@@ -123,20 +123,9 @@ func TestListReservePrunesCanceledReservationBeforeCallback(t *testing.T) {
 			t.Fatal("Reserve canceled future:", err)
 		}
 
-		// Stop the registered callback before cancellation so only Reserve's
-		// synchronous queue cleanup can free the MaxWaiters slot.
-		p.waitersMu.Lock()
-		w, ok := p.waiters.Front()
-		if !ok || w.future != canceled {
-			p.waitersMu.Unlock()
-			t.Fatal("reserved future is not at the head of the wait queue")
-		}
-		if w.stop == nil || !w.stop() {
-			p.waitersMu.Unlock()
-			t.Fatal("failed to stop cancellation callback before it ran")
-		}
-		p.waitersMu.Unlock()
-
+		// Only Reserve's synchronous queue cleanup can free the
+		// MaxWaiters slot.
+		stopCallback(t, p, canceled)
 		cancel()
 		next, err := p.Reserve(t.Context())
 		if err != nil {
@@ -150,6 +139,73 @@ func TestListReservePrunesCanceledReservationBeforeCallback(t *testing.T) {
 		}
 		if got, err := next.Wait(); got != 34 || err != nil {
 			t.Errorf("next Wait() = (%d, %v), want (34, nil)", got, err)
+		}
+	})
+}
+
+// stopCallback stops the cancellation callback of f, which must be at the
+// head of p's line, so that only the code under test can finish f.
+func stopCallback(t *testing.T, p *List[int], f *Future[int]) {
+	t.Helper()
+	p.waitersMu.Lock()
+	defer p.waitersMu.Unlock()
+	w, ok := p.waiters.front()
+	if !ok || w.future != f {
+		t.Fatal("reserved future is not at the head of the line")
+	}
+	if w.stop == nil || !w.stop() {
+		t.Fatal("failed to stop cancellation callback before it ran")
+	}
+}
+
+func TestListPutSkipsCanceledReservation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &List[int]{MaxItems: 1}
+		if _, err := p.Take(t.Context()); err != nil {
+			t.Fatal("occupy item:", err)
+		}
+
+		ctx, cancel := context.WithCancel(t.Context())
+		canceled, err := p.Reserve(ctx)
+		if err != nil {
+			t.Fatal("Reserve canceled future:", err)
+		}
+		next, err := p.Reserve(t.Context())
+		if err != nil {
+			t.Fatal("Reserve next future:", err)
+		}
+		stopCallback(t, p, canceled)
+		cancel()
+
+		p.Put(35) // skips canceled, which is still in line
+		if v, err := canceled.Wait(); v != 0 || !errors.Is(err, context.Canceled) {
+			t.Errorf("canceled Wait() = (%d, %v), want (0, context.Canceled)", v, err)
+		}
+		if v, err := next.Wait(); v != 35 || err != nil {
+			t.Errorf("next Wait() = (%d, %v), want (35, nil)", v, err)
+		}
+	})
+}
+
+func TestListCloseCanceledReservation(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		p := &List[int]{MaxItems: 1}
+		if _, err := p.Take(t.Context()); err != nil {
+			t.Fatal("occupy item:", err)
+		}
+
+		ctx, cancel := context.WithCancelCause(t.Context())
+		f, err := p.Reserve(ctx)
+		if err != nil {
+			t.Fatal("Reserve:", err)
+		}
+		stopCallback(t, p, f)
+		cause := errors.New("done")
+		cancel(cause)
+
+		p.Close()
+		if v, err := f.Wait(); v != 0 || err != cause {
+			t.Errorf("Wait() = (%d, %v), want (0, %v)", v, err, cause)
 		}
 	})
 }
