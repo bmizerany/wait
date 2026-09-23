@@ -17,14 +17,14 @@ import (
 func testGate(total int) (*Gate[int], func() int) {
 	free := total
 	l := &Gate[int]{
-		Fill: func(d int) bool {
+		Claim: func(d int) bool {
 			if d > free {
 				return false
 			}
 			free -= d
 			return true
 		},
-		Refill: func(d int) { free += d },
+		Release: func(d int) { free += d },
 	}
 	return l, func() int { return free }
 }
@@ -68,7 +68,7 @@ func TestGateZeroValue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l Gate[string]
 
-		// nil Fill admits everything; nil Refill is a no-op.
+		// nil Claim admits everything; nil Release is a no-op.
 		for range 3 {
 			if err := l.Wait(t.Context(), "anything"); err != nil {
 				t.Fatalf("Wait = %v, want nil", err)
@@ -112,7 +112,7 @@ func TestGateStrictFIFO(t *testing.T) {
 			t.Fatalf("admitted = %v, want none", admitted)
 		}
 		if got := free(); got != 1 {
-			t.Fatalf("free = %d, want 1 (C must not fill ahead of B)", got)
+			t.Fatalf("free = %d, want 1 (C must not claim ahead of B)", got)
 		}
 
 		// A releases: one Put admits B, then C, in order.
@@ -351,7 +351,7 @@ func TestGateWaitContextCancel(t *testing.T) {
 
 // TestGateNearMiss tests the near-miss scenario where an admission
 // arrives just as the context is being canceled. Unlike List, which
-// hands the raced value to the caller, a canceled Wait refunds the
+// hands the raced value to the caller, a canceled Wait releases the
 // raced grant and reports the cancellation. This test uses the
 // internal testHookCanceled field to reliably induce the
 // race condition.
@@ -380,7 +380,7 @@ func TestGateNearMiss(t *testing.T) {
 		cancel(errStop)
 		synctest.Wait()
 
-		// The raced grant was refunded: the unit the hook returned
+		// The raced grant was released: the unit the hook returned
 		// is free again, not leaked to a waiter that gave up.
 		if got := free(); got != 1 {
 			t.Fatalf("free = %d, want 1", got)
@@ -443,7 +443,7 @@ func TestGateClose(t *testing.T) {
 		})
 	})
 
-	t.Run("put after close still refills", func(t *testing.T) {
+	t.Run("put after close still releases", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
 			l, free := testGate(1)
 
@@ -479,7 +479,7 @@ func TestGateClose(t *testing.T) {
 
 // TestGateFairness admits mixed-size demands and requires service in
 // exact join order, no matter how capacity trickles back. Admission
-// order is observed from inside Fill, which runs under the Gate's lock
+// order is observed from inside Claim, which runs under the Gate's lock
 // in exactly admission order.
 func TestGateFairness(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -489,7 +489,7 @@ func TestGateFairness(t *testing.T) {
 		free := total
 		var order []int
 		l := &Gate[demand]{
-			Fill: func(d demand) bool {
+			Claim: func(d demand) bool {
 				if d.size > free {
 					return false
 				}
@@ -497,7 +497,7 @@ func TestGateFairness(t *testing.T) {
 				order = append(order, d.id)
 				return true
 			},
-			Refill: func(d demand) { free += d.size },
+			Release: func(d demand) { free += d.size },
 		}
 
 		// Occupy everything so every waiter queues.
@@ -541,14 +541,14 @@ func BenchmarkGate(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			free := 1
 			l := &Gate[int]{
-				Fill: func(d int) bool {
+				Claim: func(d int) bool {
 					if d > free {
 						return false
 					}
 					free -= d
 					return true
 				},
-				Refill: func(d int) { free += d },
+				Release: func(d int) { free += d },
 			}
 			for pb.Next() {
 				if err := l.Wait(context.Background(), 1); err != nil {
@@ -567,14 +567,14 @@ func BenchmarkGate(b *testing.B) {
 
 		free := 10
 		l := &Gate[int]{
-			Fill: func(d int) bool {
+			Claim: func(d int) bool {
 				if d > free {
 					return false
 				}
 				free -= d
 				return true
 			},
-			Refill: func(d int) { free += d },
+			Release: func(d int) { free += d },
 		}
 
 		b.RunParallel(func(pb *testing.PB) {

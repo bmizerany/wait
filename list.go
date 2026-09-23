@@ -6,8 +6,8 @@
 // removes them with [List.Retire].
 //
 // A [Gate] stores no items. It admits demands in strict arrival order against
-// capacity tracked by the caller. Its [Gate.Fill] and [Gate.Refill] callbacks
-// update that accounting.
+// capacity the caller keeps track of: [Gate.Claim] takes a demand's share,
+// and [Gate.Release] gives it back.
 //
 // Use a buffered channel when FIFO order and lazy creation limits are not
 // needed. Use [sync.Pool] for temporary allocation reuse, not for a bounded
