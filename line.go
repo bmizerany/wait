@@ -15,8 +15,8 @@ import (
 // or holding its result, never both, so a canceled waiter that finds
 // itself already gone knows its result has arrived.
 type line[D, V any] struct {
-	q     queue.Fifo[*waiter[D, V]]
-	chans sync.Pool // of chan result[V]
+	q    queue.Fifo[*waiter[D, V]]
+	free sync.Pool // of *waiter[D, V] that wait has finished with
 
 	testHookCanceled func() // runs in wait before leaving the line
 }
@@ -46,13 +46,13 @@ func (l *line[D, V]) join(ctx context.Context, d D, f *Future[V], max int) (*wai
 			return nil, ErrMaxWaiters
 		}
 	}
-	w := &waiter[D, V]{ctx: ctx, d: d, future: f}
-	if f == nil {
-		w.ch, _ = l.chans.Get().(chan result[V])
-		if w.ch == nil {
-			w.ch = make(chan result[V], 1)
-		}
+	var w *waiter[D, V]
+	if f != nil {
+		w = &waiter[D, V]{future: f}
+	} else if w, _ = l.free.Get().(*waiter[D, V]); w == nil {
+		w = &waiter[D, V]{ch: make(chan result[V], 1)}
 	}
+	w.ctx, w.d = ctx, d
 	l.q.Unshift(w)
 	return w, nil
 }
@@ -131,7 +131,12 @@ func (l *line[D, V]) wait(mu sync.Locker, w *waiter[D, V]) (r result[V], cancele
 			r.err = context.Cause(w.ctx)
 		}
 	}
-	l.chans.Put(w.ch)
+	// w has left the line and its one result is consumed, so nothing else
+	// refers to it. Drop what it holds, so a pooled waiter keeps no
+	// finished request's ctx or state alive.
+	var zero D
+	w.ctx, w.d = nil, zero
+	l.free.Put(w)
 	return r, canceled
 }
 
