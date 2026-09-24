@@ -30,11 +30,10 @@ if err != nil {
 }
 ```
 
-A list never creates items. To create connections lazily, keep them warm, or
-replace broken ones, add slots that dial for themselves: a slot starts a dial
-in the background when it's made and again when its connection breaks, so
-whoever takes it next usually finds a connection ready. The package's slot
-example shows how.
+A list never creates items. To dial ahead or replace a broken connection, add
+connections that redial themselves: one dials in the background when it's made
+and again when it breaks, so whoever takes it next usually finds it connected.
+The package's redial example shows how.
 
 A `List` holding a single item is a fair lock: whoever holds the item has
 the turn. The package's VM example uses two such lists to share a host's CPUs

@@ -55,9 +55,8 @@ var (
 // stack, so the next caller gets the most recently
 // used, warmest item. A caller gives an item back by releasing its [Ticket].
 //
-// A List never creates items. To create them lazily, keep them warm, or
-// replace broken ones, add items that do it themselves: a slot holding a
-// connection it dials in the background, say, as the package's slot
+// A List never creates items. To dial ahead, or replace a broken
+// connection, add items that do it themselves, as the package's redial
 // example shows.
 //
 // The zero List is empty and ready to use. List is safe for concurrent
