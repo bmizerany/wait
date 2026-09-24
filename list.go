@@ -48,9 +48,9 @@ var (
 // List pools reusable items of type Item.
 //
 // It hands items added with [List.Add] to callers of [List.Take] in arrival
-// order, so a caller slow to come back, after a redial or over a slow link,
-// keeps its place instead of losing each item to faster callers. Unused
-// items wait in a LIFO stack, so the next caller gets the most recently
+// order: a released item goes straight to the caller that has waited
+// longest, never to one that arrives later. Unused items wait in a LIFO
+// stack, so the next caller gets the most recently
 // used, warmest item. A caller gives an item back by releasing its [Ticket].
 //
 // A List never creates items. To create them lazily, keep them warm, or
