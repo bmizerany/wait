@@ -30,31 +30,24 @@ func ExampleList() {
 	// using conn-b
 }
 
-// A connection that fails a health check is retired instead of released.
-// The deferred Release then does nothing, and the List creates a
-// replacement for the next caller.
-func ExampleTicket_Retire() {
-	n := 0
-	conns := &wait.List[string]{
-		MaxItems: 1,
-		New: func() string {
-			n++
-			return fmt.Sprintf("conn-%d", n)
-		},
-	}
+// A connection that fails a health check is not released: its Ticket
+// keeps it out of the List, and the caller adds a replacement.
+func ExampleList_Add() {
+	var conns wait.List[string]
+	conns.Add("conn-1")
 
 	query := func(healthy bool) error {
 		t := conns.Take(context.Background())
-		defer t.Release()
 		c, err := t.Value()
 		if err != nil {
 			return err
 		}
 		fmt.Println("using", c)
 		if !healthy {
-			t.Retire()
+			conns.Add("conn-2") // in real code, dial in a goroutine and Add on success
 			return fmt.Errorf("%s: broken", c)
 		}
+		t.Release()
 		return nil
 	}
 
@@ -87,56 +80,11 @@ func ExampleList_Close() {
 			fmt.Println(err)
 			break
 		}
-		fmt.Println("closing", c)
-		t.Retire()
+		fmt.Println("closing", c) // not released: it is ours to close
 	}
 
 	// Output:
 	// closing conn-b
 	// closing conn-a
 	// closed
-}
-
-// A Gate over a budget of 10 bytes. Each admitted request holds its bytes
-// until it releases its Ticket.
-func ExampleGate() {
-	budget := 10
-	g := &wait.Gate[int]{
-		Claim: func(n int) bool {
-			if n > budget {
-				return false
-			}
-			budget -= n
-			return true
-		},
-		Release: func(n int) { budget += n },
-	}
-
-	tk := g.Take(context.Background(), 8)
-	if _, err := tk.Value(); err != nil {
-		log.Fatal(err)
-	}
-
-	// now is a package-level ctx that is already done (see the now
-	// example), so these Takes ask only for what fits at once.
-	if _, err := g.Take(now, 4).Value(); err != nil {
-		fmt.Println("4 does not fit beside 8")
-	}
-
-	tk.Release()
-	tk.Release() // no effect: the 8 bytes come back once
-
-	if _, err := g.Take(now, 11).Value(); err != nil {
-		fmt.Println("11 does not fit in 10")
-	}
-	tk = g.Take(now, 10)
-	if _, err := tk.Value(); err == nil {
-		fmt.Println("10 fits")
-	}
-	tk.Release()
-
-	// Output:
-	// 4 does not fit beside 8
-	// 11 does not fit in 10
-	// 10 fits
 }

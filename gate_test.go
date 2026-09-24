@@ -1,611 +1,66 @@
-package wait
+package wait_test
 
 import (
 	"context"
-	"errors"
-	"slices"
-	"sync/atomic"
+	"fmt"
 	"testing"
 	"testing/synctest"
-	"time"
 )
 
-// testGate returns a Gate admitting int demands against capacity
-// total, plus a func reporting the current free capacity. The free
-// counter is mutated only under the Gate's lock; tests read it after
-// synctest.Wait, when the bubble is quiesced.
-func testGate(total int) (*Gate[int], func() int) {
-	free := total
-	g := &Gate[int]{
-		Claim: func(d int) bool {
-			if d > free {
-				return false
-			}
-			free -= d
-			return true
-		},
-		Release: func(d int) { free += d },
-	}
-	return g, func() int { return free }
-}
-
-// held waits for tk to be admitted, failing t if it is not, and returns tk.
-func held[T any](t *testing.T, tk Ticket[T]) Ticket[T] {
-	t.Helper()
-	if _, err := tk.Value(); err != nil {
-		t.Fatalf("Value() = %v, want admission", err)
-	}
-	return tk
+type demand struct {
+	name string
+	n    int
 }
 
 func TestGate(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(4)
-
-		admit := func(d int) Ticket[int] {
-			t.Helper()
-			tk := held(t, g.Take(t.Context(), d))
-			return tk
-		}
-		checkFree := func(want int) {
-			t.Helper()
-			if got := free(); got != want {
-				t.Errorf("free = %d, want %d", got, want)
-			}
-		}
-
-		// An empty line admits fitting demands without queueing.
-		tk3 := admit(3)
-		checkFree(1)
-		tk1 := admit(1)
-		checkFree(0)
-
-		// Releasing returns capacity for the next demand.
-		tk3.Release()
-		checkFree(3)
-		tk2 := admit(2)
-		checkFree(1)
-
-		tk2.Release()
-		tk1.Release()
-		checkFree(4)
-	})
-}
-
-func TestGateZeroValue(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var g Gate[string]
-
-		// nil Claim admits everything; nil Release is a no-op.
-		for range 3 {
-			tk := held(t, g.Take(t.Context(), "anything"))
-			tk.Release()
-		}
-		tk := g.Take(done, "more")
-		if _, err := tk.Value(); err != nil {
-			t.Fatal("Take(done) not admitted, want admitted")
-		}
-		tk.Release()
-	})
-}
-
-func TestGateStrictFIFO(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(4)
-
-		// A takes most of the capacity.
-		tkA := held(t, g.Take(t.Context(), 3))
-
-		// B does not fit and heads the line. C fits the free
-		// capacity but must not pass B.
-		var admitted [2]bool
-		go func() {
-			if _, err := g.Take(t.Context(), 2).Value(); err != nil {
-				t.Errorf("B Take(2) = %v, want nil", err)
-			}
-			admitted[0] = true
-		}()
-		synctest.Wait()
-		go func() {
-			if _, err := g.Take(t.Context(), 1).Value(); err != nil {
-				t.Errorf("C Take(1) = %v, want nil", err)
-			}
-			admitted[1] = true
-		}()
-		synctest.Wait()
-
-		if admitted != [2]bool{} {
-			t.Fatalf("admitted = %v, want none", admitted)
-		}
-		if got := free(); got != 1 {
-			t.Fatalf("free = %d, want 1 (C must not claim ahead of B)", got)
-		}
-
-		// A releases: that one release admits B, then C, in order.
-		tkA.Release()
-		synctest.Wait()
-		if admitted != [2]bool{true, true} {
-			t.Fatalf("admitted = %v, want both", admitted)
-		}
-		if got := free(); got != 1 {
-			t.Fatalf("free = %d, want 1", got)
-		}
-	})
-}
-
-func TestGateCascade(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(7)
-
-		tk4 := held(t, g.Take(t.Context(), 4))
-		tk3 := held(t, g.Take(t.Context(), 3))
-
-		var admitted [3]bool
-		for i, d := range []int{2, 2, 3} {
-			go func() {
-				if _, err := g.Take(t.Context(), d).Value(); err != nil {
-					t.Errorf("waiter %d Take(%d) = %v, want nil", i, d, err)
+		var order []string // appended only by the turn holder
+		acquire, release := gate(4,
+			func(free int, d demand) (int, bool) {
+				if d.n > free {
+					return free, false
 				}
-				admitted[i] = true
-			}()
+				order = append(order, d.name)
+				return free - d.n, true
+			},
+			func(free int, d demand) int { return free + d.n })
+		ctx := t.Context()
+
+		acquire(ctx, demand{"A", 3})
+		wait := func(ctx context.Context, d demand) <-chan error {
+			ch := make(chan error, 1)
+			go func() { ch <- acquire(ctx, d) }()
 			synctest.Wait()
+			return ch
 		}
 
-		// One release admits waiters in order until the head no
-		// longer fits: 2 and 2 admit, 3 stays at the head.
-		tk4.Release()
-		synctest.Wait()
-		if want := [3]bool{true, true, false}; admitted != want {
-			t.Fatalf("admitted = %v, want %v", admitted, want)
-		}
-		if got := free(); got != 0 {
-			t.Fatalf("free = %d, want 0", got)
+		b := wait(ctx, demand{"B", 2}) // 1 free: B waits at the front
+		c := wait(ctx, demand{"C", 1}) // 1 would fit, but C stays behind B
+		if want := "[A]"; fmt.Sprint(order) != want {
+			t.Fatalf("order = %v, want %s", order, want)
 		}
 
-		// Enough for the head; it admits.
-		tk3.Release()
-		synctest.Wait()
-		if want := [3]bool{true, true, true}; admitted != want {
-			t.Fatalf("admitted = %v, want %v", admitted, want)
-		}
-		if got := free(); got != 0 {
-			t.Fatalf("free = %d, want 0", got)
-		}
-	})
-}
-
-func TestGateTakeDone(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(4)
-
-		// Empty line: Take with a done ctx admits what fits now.
-		tk := g.Take(done, 3)
-		if _, err := tk.Value(); err != nil {
-			t.Fatal("Take(done, 3) not admitted, want admitted")
-		}
-		if _, err := g.Take(done, 2).Value(); err == nil {
-			t.Fatal("Take(done, 2) admitted, want not (only 1 free)")
+		release(demand{"A", 3}) // 4 free: B, then C
+		<-b
+		<-c
+		if want := "[A B C]"; fmt.Sprint(order) != want {
+			t.Fatalf("order = %v, want %s", order, want)
 		}
 
-		// A waiter joins the line. Take(done) must fail even though its
-		// demand fits: it never cuts the line, and never joins it.
-		go func() {
-			if _, err := g.Take(t.Context(), 2).Value(); err != nil {
-				t.Errorf("Take(2) = %v, want nil", err)
-			}
-		}()
-		synctest.Wait()
-		if _, err := g.Take(done, 1).Value(); err == nil {
-			t.Fatal("Take(done, 1) admitted, want not (a waiter is in line)")
-		}
-
-		// The waiter admits and the line empties; Take(done) works again.
-		tk.Release()
-		synctest.Wait()
-		if got := free(); got != 2 {
-			t.Fatalf("free = %d, want 2", got)
-		}
-		if _, err := g.Take(done, 2).Value(); err != nil {
-			t.Fatal("Take(done, 2) not admitted, want admitted")
-		}
-	})
-}
-
-func TestGateTakeCancel(t *testing.T) {
-	t.Run("early cancel", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(1)
-
-			// 2 does not fit, so the done ctx wins and nothing is claimed.
-			if _, err := g.Take(done, 2).Value(); !errors.Is(err, context.Canceled) {
-				t.Errorf("err = %v, want context.Canceled", err)
-			}
-			if got := free(); got != 1 {
-				t.Errorf("free = %d, want 1 (nothing deducted)", got)
-			}
-		})
-	})
-
-	t.Run("waiting cancel", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(1)
-
-			tk := held(t, g.Take(t.Context(), 1))
-
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-
-			go func() {
-				if _, err := g.Take(ctx, 1).Value(); !errors.Is(err, context.Canceled) {
-					t.Errorf("Take = %v, want context.Canceled", err)
-				}
-			}()
-			synctest.Wait()
-
-			cancel()
-			synctest.Wait()
-
-			// The canceled waiter left the line without a tk.
-			tk.Release()
-			if got := free(); got != 1 {
-				t.Fatalf("free = %d, want 1", got)
-			}
-			if _, err := g.Take(done, 1).Value(); err != nil {
-				t.Fatal("Take(done, 1) not admitted, want admitted (line should be empty)")
-			}
-		})
-	})
-
-	t.Run("mid-queue cancel is skipped over", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(3)
-
-			tk := held(t, g.Take(t.Context(), 3))
-
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-
-			var admitted [3]bool
-			for i, d := range []int{1, 2, 1} {
-				go func() {
-					wctx := t.Context()
-					if i == 1 {
-						wctx = ctx
-					}
-					_, err := g.Take(wctx, d).Value()
-					if i == 1 {
-						if !errors.Is(err, context.Canceled) {
-							t.Errorf("waiter %d Take = %v, want context.Canceled", i, err)
-						}
-						return
-					}
-					if err != nil {
-						t.Errorf("waiter %d Take(%d) = %v, want nil", i, d, err)
-					}
-					admitted[i] = true
-				}()
-				synctest.Wait()
-			}
-
-			// Cancel the middle waiter; the others keep their spots.
-			cancel()
-			synctest.Wait()
-
-			tk.Release()
-			synctest.Wait()
-			if want := [3]bool{true, false, true}; admitted != want {
-				t.Fatalf("admitted = %v, want %v", admitted, want)
-			}
-			if got := free(); got != 1 {
-				t.Fatalf("free = %d, want 1", got)
-			}
-		})
-	})
-
-	t.Run("head cancel unblocks a fitting successor", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(3)
-
-			if _, err := g.Take(t.Context(), 1).Value(); err != nil {
-				t.Fatal("A Take(1):", err)
-			}
-
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-
-			// B heads the line, too big for the 2 free. C fits but
-			// waits behind B.
-			go func() {
-				if _, err := g.Take(ctx, 3).Value(); !errors.Is(err, context.Canceled) {
-					t.Errorf("B Take(3) = %v, want context.Canceled", err)
-				}
-			}()
-			synctest.Wait()
-
-			var admitted bool
-			go func() {
-				if _, err := g.Take(t.Context(), 2).Value(); err != nil {
-					t.Errorf("C Take(2) = %v, want nil", err)
-				}
-				admitted = true
-			}()
-			synctest.Wait()
-
-			if admitted {
-				t.Fatal("C admitted behind a blocked head")
-			}
-
-			// B leaves; C is the head now and fits, with no release.
-			cancel()
-			synctest.Wait()
-
-			if !admitted {
-				t.Fatal("C not admitted after head canceled")
-			}
-			if got := free(); got != 0 {
-				t.Fatalf("free = %d, want 0", got)
-			}
-		})
-	})
-}
-
-func TestGateSkipsCanceled(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(1)
-
-		tk := held(t, g.Take(t.Context(), 1))
-		// Free the capacity after ctx is canceled but before Value
-		// notices. The Gate must not claim it for the canceled Ticket.
-		g.waiters.testHookCanceled = tk.Release
-
-		errStop := errors.New("stop")
-		ctx, cancel := context.WithCancelCause(t.Context())
-
-		go func() {
-			if _, err := g.Take(ctx, 1).Value(); !errors.Is(err, errStop) {
-				t.Errorf("Value() = %v, want errStop", err)
-			}
-		}()
-		synctest.Wait()
-
-		cancel(errStop)
-		synctest.Wait()
-
-		if got := free(); got != 1 {
-			t.Fatalf("free = %d, want 1", got)
-		}
-		if _, err := g.Take(done, 1).Value(); err != nil {
-			t.Fatal("Take(done, 1) not admitted, want admitted (line should be empty)")
-		}
-	})
-}
-
-func TestGateAdmissionWins(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		g, free := testGate(1)
-
-		holder := held(t, g.Take(t.Context(), 1))
-		ctx, cancel := context.WithCancel(t.Context())
-		tk := g.Take(ctx, 1)
-		holder.Release() // admits tk
+		// D waits for 2 and gives up; E, behind it, gets in once 1 is back.
+		cctx, cancel := context.WithCancel(ctx)
+		d := wait(cctx, demand{"D", 2})
+		e := wait(ctx, demand{"E", 1})
 		cancel()
-
-		if d, err := tk.Value(); d != 1 || err != nil {
-			t.Fatalf("Value() = %d, %v, want 1, nil", d, err)
+		if err := <-d; err != context.Canceled {
+			t.Fatalf("D = %v, want context.Canceled", err)
 		}
-		if got := free(); got != 0 {
-			t.Fatalf("free before Release = %d, want 0", got)
+		release(demand{"C", 1})
+		if err := <-e; err != nil {
+			t.Fatalf("E = %v", err)
 		}
-		tk.Release()
-		if got := free(); got != 1 {
-			t.Fatalf("free after Release = %d, want 1", got)
+		if want := "[A B C E]"; fmt.Sprint(order) != want {
+			t.Fatalf("order = %v, want %s", order, want)
 		}
-	})
-}
-
-func TestGateClose(t *testing.T) {
-	t.Run("unblocks waiters", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(1)
-
-			if _, err := g.Take(t.Context(), 1).Value(); err != nil {
-				t.Fatal("draining:", err)
-			}
-
-			var inflight atomic.Int64
-			for range 3 {
-				inflight.Add(1)
-				go func() {
-					defer inflight.Add(-1)
-					if _, err := g.Take(t.Context(), 1).Value(); !errors.Is(err, ErrClosed) {
-						t.Errorf("Take err = %v, want ErrClosed", err)
-					}
-				}()
-			}
-			synctest.Wait()
-
-			if got := inflight.Load(); got != 3 {
-				t.Fatalf("inflight = %d, want 3", got)
-			}
-
-			g.Close()
-			synctest.Wait()
-
-			if got := inflight.Load(); got != 0 {
-				t.Fatalf("inflight = %d, want 0", got)
-			}
-			if got := free(); got != 0 {
-				t.Fatalf("free = %d, want 0 (closed waiters never deducted)", got)
-			}
-		})
-	})
-
-	t.Run("wait after", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, _ := testGate(1)
-
-			g.Close()
-
-			if _, err := g.Take(t.Context(), 1).Value(); !errors.Is(err, ErrClosed) {
-				t.Errorf("Take err = %v, want ErrClosed", err)
-			}
-			if _, err := g.Take(done, 1).Value(); err == nil {
-				t.Error("Take(done) after Close admitted, want ErrClosed")
-			}
-		})
-	})
-
-	t.Run("release after", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, free := testGate(1)
-
-			tk := held(t, g.Take(t.Context(), 1))
-
-			g.Close()
-
-			// The accounting belongs to the caller; a release
-			// during shutdown must still land.
-			tk.Release()
-			if got := free(); got != 1 {
-				t.Fatalf("free = %d, want 1", got)
-			}
-		})
-	})
-
-	t.Run("idempotent", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			g, _ := testGate(1)
-
-			g.Close()
-			g.Close()
-			g.Close()
-
-			if _, err := g.Take(t.Context(), 1).Value(); !errors.Is(err, ErrClosed) {
-				t.Errorf("Take err = %v, want ErrClosed", err)
-			}
-		})
-	})
-}
-
-// TestGateFairness admits mixed-size demands and requires service in
-// exact join order, no matter how capacity trickles back. Admission
-// order is observed from inside Claim, which runs under the Gate's lock
-// in exactly admission order.
-func TestGateFairness(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		type demand struct{ id, size int }
-
-		const total = 10
-		free := total
-		var order []int
-		g := &Gate[demand]{
-			Claim: func(d demand) bool {
-				if d.size > free {
-					return false
-				}
-				free -= d.size
-				order = append(order, d.id)
-				return true
-			},
-			Release: func(d demand) { free += d.size },
-		}
-
-		// Occupy everything so every waiter queues.
-		tk := held(t, g.Take(t.Context(), demand{id: -1, size: total}))
-
-		// Mixed sizes, several larger than their successors, one as
-		// big as the whole line. Join order is pinned by waiting for
-		// each waiter to durably block before starting the next.
-		sizes := []int{5, 1, 9, 2, 10, 1, 3, 7}
-		for i, size := range sizes {
-			go func() {
-				d := demand{id: i, size: size}
-				tk := g.Take(t.Context(), d)
-				if _, err := tk.Value(); err != nil {
-					t.Errorf("waiter %d Take = %v, want nil", i, err)
-					return
-				}
-				tk.Release()
-			}()
-			synctest.Wait()
-		}
-
-		// Release the line and let the admissions cascade; each
-		// waiter returns its capacity as it goes.
-		tk.Release()
-		synctest.Wait()
-
-		want := []int{-1, 0, 1, 2, 3, 4, 5, 6, 7}
-		if !slices.Equal(order, want) {
-			t.Fatalf("admission order = %v, want %v", order, want)
-		}
-		if free != total {
-			t.Fatalf("free = %d, want %d", free, total)
-		}
-	})
-}
-
-func BenchmarkGate(b *testing.B) {
-	b.Run("uncontended", func(b *testing.B) {
-		b.RunParallel(func(pb *testing.PB) {
-			free := 1
-			g := &Gate[int]{
-				Claim: func(d int) bool {
-					if d > free {
-						return false
-					}
-					free -= d
-					return true
-				},
-				Release: func(d int) { free += d },
-			}
-			for pb.Next() {
-				tk := g.Take(context.Background(), 1)
-				if _, err := tk.Value(); err != nil {
-					b.Fatal("Take:", err)
-				}
-				tk.Release()
-			}
-		})
-	})
-
-	b.Run("contended", func(b *testing.B) {
-		b.ReportAllocs()
-
-		var tttw atomic.Int64 // total-time-to-wait
-		var tttr atomic.Int64 // total-time-to-release
-
-		free := 10
-		g := &Gate[int]{
-			Claim: func(d int) bool {
-				if d > free {
-					return false
-				}
-				free -= d
-				return true
-			},
-			Release: func(d int) { free += d },
-		}
-
-		b.RunParallel(func(pb *testing.PB) {
-			for pb.Next() {
-				ttw := time.Now()
-				tk := g.Take(context.Background(), 1)
-				if _, err := tk.Value(); err != nil {
-					b.Fatal("Take:", err)
-				}
-				tttw.Add(time.Since(ttw).Nanoseconds())
-
-				// "work"
-				time.Sleep(time.Millisecond)
-
-				ttr := time.Now()
-				tk.Release()
-				tttr.Add(time.Since(ttr).Nanoseconds())
-			}
-		})
-
-		b.ReportMetric(float64(tttw.Load())/float64(b.N), "ns/wait")
-		b.ReportMetric(float64(tttr.Load())/float64(b.N), "ns/release")
 	})
 }

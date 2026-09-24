@@ -2,15 +2,19 @@ package wait
 
 import "context"
 
-// A Ticket is a place in the line of a [List] or a [Gate] and, once
-// admitted, what it was admitted to: an item from a List, or a demand's
-// capacity from a Gate.
+// A Ticket is a place in a [List]'s line and, once admitted, the item it
+// was admitted with.
 //
-// Value waits for admission. Release gives back what the Ticket holds, or
-// leaves the line if the Ticket is still waiting; Retire ends the Ticket
-// without giving anything back. The first Release or Retire ends the
-// Ticket and every copy of it: after that, Value returns [ErrReleased],
-// and Release and Retire do nothing. The zero Ticket is ended.
+// Value waits for admission. Release gives the item back to the List, or
+// leaves the line if the Ticket is still waiting. The first Release ends
+// the Ticket and every copy of it: after that, Value returns
+// [ErrReleased], and Release does nothing. The zero Ticket is ended.
+//
+// The holder of an admitted Ticket that is never released owns its item
+// outright, for instance to close a broken connection rather than give it
+// back. The item still counts against MaxItems, so a List replaces it
+// only if someone adds a new item with [List.Add]. A Ticket still waiting
+// keeps its place until its ctx is done or it is released.
 //
 // A Ticket is for use by one goroutine at a time.
 type Ticket[T any] struct {
@@ -19,8 +23,8 @@ type Ticket[T any] struct {
 	err error // why the Ticket failed without joining the line
 }
 
-// Value returns the item or demand the Ticket was admitted with, waiting
-// for admission if necessary. If the Ticket failed, Value returns the
+// Value returns the item the Ticket was admitted with, waiting for
+// admission if necessary. If the Ticket failed, Value returns the
 // error: [ErrClosed], [ErrMaxWaiters], or the cause of the context passed
 // to Take. An admission that races with cancellation wins.
 func (t Ticket[T]) Value() (T, error) {
@@ -38,7 +42,7 @@ func (t Ticket[T]) Value() (T, error) {
 		// Settled: only this Ticket's holder touches w now.
 		return w.v, w.err
 	}
-	mu := w.o.mutex()
+	mu := &w.list.mu
 	mu.Lock()
 	defer mu.Unlock()
 	if w.state() == waiting {
@@ -46,7 +50,7 @@ func (t Ticket[T]) Value() (T, error) {
 		select {
 		case <-w.ch:
 		case <-w.ctx.Done():
-			if h := w.o.line().testHookCanceled; h != nil {
+			if h := w.list.waiters.testHookCanceled; h != nil {
 				h()
 			}
 		}
@@ -54,9 +58,8 @@ func (t Ticket[T]) Value() (T, error) {
 		if w.gen.Load() != t.gen {
 			return zero, ErrReleased
 		}
-		if w.state() == waiting && w.o.line().leave(w) {
+		if w.state() == waiting && w.list.waiters.leave(w) {
 			w.fail(context.Cause(w.ctx))
-			w.o.left()
 		}
 		select {
 		case <-w.ch:
@@ -75,47 +78,34 @@ func (t Ticket[T]) Ready() bool {
 	if w.gen.Load() != t.gen || w.state() != waiting {
 		return true
 	}
-	mu := w.o.mutex()
+	mu := &w.list.mu
 	mu.Lock()
 	defer mu.Unlock()
 	return w.state() != waiting || w.ctx.Err() != nil
 }
 
 // Release ends the Ticket. If it was admitted, Release gives its item back
-// to the List, or its capacity back to the Gate; if it is still waiting,
-// Release takes it out of the line.
-func (t Ticket[T]) Release() { t.end(false) }
-
-// Retire ends the Ticket without giving back what it holds. A List no
-// longer counts a retired item among its live items, and may create a
-// replacement; a Gate never releases a retired demand's capacity.
-func (t Ticket[T]) Retire() { t.end(true) }
-
-func (t Ticket[T]) end(retire bool) {
+// to the List; if it is still waiting, Release takes it out of the line.
+func (t Ticket[T]) Release() {
 	w := t.w
 	if w == nil {
 		return
 	}
-	mu := w.o.mutex()
-	mu.Lock()
-	defer mu.Unlock()
+	l := w.list
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if w.gen.Load() != t.gen {
 		return
 	}
 	switch w.state() {
 	case waiting:
-		w.o.line().leave(w)
-		w.o.line().recycle(w)
-		w.o.left()
+		l.waiters.leave(w)
+		l.waiters.recycle(w)
 	case admitted:
 		v := w.v
-		w.o.line().recycle(w)
-		if retire {
-			w.o.retire(v)
-		} else {
-			w.o.give(v)
-		}
+		l.waiters.recycle(w)
+		l.give(v)
 	case failed:
-		w.o.line().recycle(w)
+		l.waiters.recycle(w)
 	}
 }

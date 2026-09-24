@@ -1,16 +1,12 @@
-// Package wait provides first-come lines for reusable items and capacity.
+// Package wait provides a first-come line for reusable items.
 //
 // A [List] pools items added with [List.Add] and can create more lazily up to a
 // limit. Queued callers get items in arrival order, so waiting is fair, and
 // unused items wait in a LIFO stack, so the next caller gets the most recently
 // used item, whose connection or cache is likeliest to still be warm.
 //
-// A [Gate] stores no items. It admits demands in strict arrival order against
-// capacity the caller keeps track of: [Gate.Claim] takes a demand's share,
-// and [Gate.Release] gives it back.
-//
-// Take on either returns a [Ticket] holding the caller's place in line. Its
-// Value waits for admission, and its Release gives back what it holds:
+// Take returns a [Ticket] holding the caller's place in line. Its Value waits
+// for admission, and its Release gives the item back:
 //
 //	t := conns.Take(ctx)
 //	defer t.Release()
@@ -18,6 +14,10 @@
 //	if err != nil {
 //		return err
 //	}
+//
+// A List of one item is a fair lock: holding the item is your turn. The
+// package's gate example builds admission against shared capacity from two
+// such Lists.
 //
 // Use a buffered channel when FIFO order and lazy creation limits are not
 // needed. Use [sync.Pool] for temporary allocation reuse, not for a bounded
@@ -37,32 +37,33 @@ var (
 	// MaxWaiters Tickets already waiting.
 	ErrMaxWaiters = errors.New("too many waiters")
 
-	// ErrClosed is returned by [Ticket.Value] when the List or Gate is
-	// closed before the Ticket is admitted.
+	// ErrClosed is returned by [Ticket.Value] when the List is closed
+	// before the Ticket is admitted.
 	ErrClosed = errors.New("closed")
 
 	// ErrReleased is returned by [Ticket.Value] after the Ticket is
-	// released or retired, and for the zero Ticket.
+	// released, and for the zero Ticket.
 	ErrReleased = errors.New("ticket released")
 )
 
 // List pools reusable items of type Item.
 //
-// It pools items added with [List.Add] and can create more lazily up to
-// MaxItems. Queued callers receive items in FIFO order; unused items wait in a
-// LIFO stack, so the next caller gets the most recently used, warmest item.
-// A caller gives back an item by releasing its [Ticket], or drops it for good
-// by retiring the Ticket.
+// It pools items added with [List.Add] and can create more lazily with New,
+// up to MaxItems. Queued callers receive items in FIFO order; unused items
+// wait in a LIFO stack, so the next caller gets the most recently used,
+// warmest item. A caller gives an item back by releasing its [Ticket], or
+// keeps it for good by not releasing it.
 //
-// The zero value has no limits and creates zero-valued items if New is nil.
-// List is safe for concurrent use.
+// The zero List creates nothing: it hands items added with Add to callers
+// in arrival order. List is safe for concurrent use.
 type List[Item any] struct {
-	// MaxItems is the maximum number of items to create via New.
-	// Zero means no limit.
+	// MaxItems is the most items New creates. An item whose Ticket is never
+	// released still counts. Zero means no limit.
 	MaxItems int
 
-	// New creates an item when the ready queue is empty and MaxItems allows.
-	// If nil, New returns the zero value of Item.
+	// New creates an item, in its own goroutine, when a Ticket waits and
+	// MaxItems allows. If New is nil, the List never creates items: Tickets
+	// wait for items added with Add or released by other Tickets.
 	New func() Item
 
 	// MaxWaiters is the maximum number of Tickets waiting in line. A Take
@@ -72,7 +73,7 @@ type List[Item any] struct {
 
 	mu      sync.Mutex       // guards the fields below
 	ready   queue.Lifo[Item] // LIFO stack of ready items
-	loads   int              // number of live items created by New
+	loads   int              // number of items New has created or is creating
 	waiters line[Item]
 	closed  bool
 }
@@ -132,10 +133,6 @@ func (l *List[T]) Close() {
 	l.waiters.close()
 }
 
-func (l *List[T]) mutex() *sync.Mutex { return &l.mu }
-func (l *List[T]) line() *line[T]     { return &l.waiters }
-func (l *List[T]) left()              {}
-
 // give hands v to the first waiting Ticket, or stores it for later.
 func (l *List[T]) give(v T) {
 	if _, ok := l.waiters.front(); ok {
@@ -145,27 +142,8 @@ func (l *List[T]) give(v T) {
 	l.ready.Push(v)
 }
 
-// retire drops a retired item from the live count and, if the List is
-// open, starts a replacement for a waiting Ticket.
-func (l *List[T]) retire(T) {
-	if l.loads == 0 {
-		return
-	}
-	l.loads--
-	if !l.closed {
-		l.startNextLoadLocked()
-	}
-}
-
-func normalizeNew[T any](new func() T) func() T {
-	if new != nil {
-		return new
-	}
-	return func() (zero T) { return }
-}
-
 func (l *List[T]) startNextLoadLocked() {
-	if l.MaxItems > 0 && l.loads >= l.MaxItems {
+	if l.New == nil || l.MaxItems > 0 && l.loads >= l.MaxItems {
 		return
 	}
 	w := l.nextWaiterToLoadLocked()
@@ -174,7 +152,7 @@ func (l *List[T]) startNextLoadLocked() {
 	}
 	w.loading = true
 	l.loads++
-	newItem := normalizeNew(l.New)
+	newItem := l.New
 	go func() { l.Add(newItem()) }()
 }
 

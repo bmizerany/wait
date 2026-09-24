@@ -8,18 +8,8 @@ import (
 	"blake.io/wait/queue"
 )
 
-// An owner is the List or Gate behind a line and its Tickets. Every
-// method but mutex runs with the mutex held.
-type owner[V any] interface {
-	mutex() *sync.Mutex // guards the line and the state of its waiters
-	line() *line[V]
-	give(v V)   // take back the value of an admitted Ticket
-	retire(v V) // end an admitted Ticket without taking its value back
-	left()      // a waiter left the line before admission
-}
-
-// A line is the first-come queue behind a List or a Gate, and the pool of
-// waiters behind their Tickets. The owner's mutex guards it.
+// A line is the first-come queue behind a List, and the pool of waiters
+// behind its Tickets. The List's mutex guards it.
 type line[V any] struct {
 	q     queue.Fifo[*waiter[V]]
 	spare [4]*waiter[V] // recycled waiters kept for reuse
@@ -45,24 +35,24 @@ const (
 // When its Ticket is released, the waiter's gen is bumped before it
 // returns to the pool, so a stale copy of the Ticket no longer matches it.
 //
-// The owner's mutex guards every field, but st and gen are also atomic:
+// The List's mutex guards every field, but st and gen are also atomic:
 // once a waiter settles, only its Ticket's holder touches it, so Value can
 // find it settled and read v and err without the mutex.
 type waiter[V any] struct {
-	o       owner[V]
+	list    *List[V]
 	ch      chan struct{} // wakes Value; holds a token while settled and unread
 	ctx     context.Context
-	v       V // for a Gate, the demand; for a List, the admitted item
+	v       V // the admitted item
 	err     error
 	st      atomic.Uint32 // a state; stored after v and err
 	gen     atomic.Uint64
-	loading bool // a List is creating an item on this waiter's behalf
+	loading bool // New is creating an item on this waiter's behalf
 	queued  bool // joined the line, so ch may hold a token
 }
 
 func (w *waiter[V]) state() state { return state(w.st.Load()) }
 
-func (l *line[V]) get(o owner[V]) *waiter[V] {
+func (l *line[V]) get(list *List[V]) *waiter[V] {
 	if l.nfree > 0 {
 		l.nfree--
 		w := l.spare[l.nfree]
@@ -71,14 +61,14 @@ func (l *line[V]) get(o owner[V]) *waiter[V] {
 	}
 	w, _ := l.free.Get().(*waiter[V])
 	if w == nil {
-		w = &waiter[V]{o: o, ch: make(chan struct{}, 1)}
+		w = &waiter[V]{list: list, ch: make(chan struct{}, 1)}
 	}
 	return w
 }
 
 // ticket returns an already admitted Ticket for v.
-func (l *line[V]) ticket(o owner[V], v V) Ticket[V] {
-	w := l.get(o)
+func (l *line[V]) ticket(list *List[V], v V) Ticket[V] {
+	w := l.get(list)
 	w.v = v
 	w.st.Store(uint32(admitted))
 	return Ticket[V]{w: w, gen: w.gen.Load()}
@@ -87,14 +77,14 @@ func (l *line[V]) ticket(o owner[V], v V) Ticket[V] {
 // join adds a waiter for ctx, holding v, to the end of the line and returns
 // its Ticket. If max is positive and the line holds max waiters even after
 // removing those whose ctx is done, join returns ErrMaxWaiters instead.
-func (l *line[V]) join(o owner[V], ctx context.Context, v V, max int) (Ticket[V], error) {
+func (l *line[V]) join(list *List[V], ctx context.Context, v V, max int) (Ticket[V], error) {
 	if max > 0 && l.q.Len() >= max {
 		l.prune()
 		if l.q.Len() >= max {
 			return Ticket[V]{}, ErrMaxWaiters
 		}
 	}
-	w := l.get(o)
+	w := l.get(list)
 	w.ctx, w.v, w.queued = ctx, v, true
 	w.st.Store(uint32(waiting))
 	l.q.Unshift(w)
@@ -185,7 +175,7 @@ func (w *waiter[V]) fail(err error) {
 	w.wake()
 }
 
-// wake signals a settled waiter. The owner settles a waiter once, as it
+// wake signals a settled waiter. The List settles a waiter once, as it
 // leaves the line, so ch always has room.
 func (w *waiter[V]) wake() {
 	select {
