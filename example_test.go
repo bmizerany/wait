@@ -15,15 +15,17 @@ func ExampleList() {
 	conns.Add("conn-a")
 	conns.Add("conn-b")
 
-	for range 2 {
+	use := func() {
 		t := conns.Take(context.Background())
+		defer t.Release()
 		c, err := t.Value()
 		if err != nil {
 			log.Fatal(err)
 		}
 		fmt.Println("using", c)
-		t.Release()
 	}
+	use()
+	use()
 
 	// Output:
 	// using conn-b

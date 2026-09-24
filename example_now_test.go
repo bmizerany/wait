@@ -21,13 +21,15 @@ func Example_now() {
 	conns.Add("conn-a")
 
 	t := conns.Take(now)
+	defer t.Release()
 	if c, err := t.Value(); err == nil {
 		fmt.Println("took", c)
 	}
+	// Nothing else is ready, so this Take fails at once and holds nothing
+	// to release.
 	if _, err := conns.Take(now).Value(); err != nil {
 		fmt.Println("no conn ready:", err)
 	}
-	t.Release()
 
 	// Output:
 	// took conn-a

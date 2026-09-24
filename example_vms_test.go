@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 
 	"blake.io/wait"
 )
@@ -52,35 +53,30 @@ func (h *Host) Acquire(ctx context.Context, s Spec) error {
 // Release gives s back to the Host.
 func (h *Host) Release(s Spec) { h.back.Add(s) }
 
-// A host with 16 CPUs and 64 GB of memory. The small VM's CPUs fit beside
-// the big one, but its memory does not, so it waits its turn.
+// A host with 16 CPUs and 64 GB of memory. While the big VM runs, a small
+// one arrives: its CPUs fit, but its memory does not, so it waits its turn.
 func Example_vms() {
 	h := NewHost(Spec{CPUs: 16, MemoryGB: 64})
-	ctx := context.Background()
-	big := Spec{CPUs: 8, MemoryGB: 48}
-	small := Spec{CPUs: 4, MemoryGB: 32}
+	var wg sync.WaitGroup
 
-	if err := h.Acquire(ctx, big); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("running", big)
-
-	done := make(chan struct{})
-	go func() {
-		if err := h.Acquire(ctx, small); err != nil {
+	run := func(s Spec, work func()) {
+		if err := h.Acquire(context.Background(), s); err != nil {
 			log.Fatal(err)
 		}
-		defer h.Release(small)
-		fmt.Println("running", small)
-		close(done)
-	}()
+		defer h.Release(s)
+		fmt.Println("running", s)
+		work()
+		fmt.Println("stopping", s)
+	}
 
-	fmt.Println("stopping", big)
-	h.Release(big)
-	<-done
+	run(Spec{CPUs: 8, MemoryGB: 48}, func() {
+		wg.Go(func() { run(Spec{CPUs: 4, MemoryGB: 32}, func() {}) })
+	})
+	wg.Wait()
 
 	// Output:
 	// running {8 48}
 	// stopping {8 48}
 	// running {4 32}
+	// stopping {4 32}
 }
