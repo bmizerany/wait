@@ -5,11 +5,6 @@
 // so the next caller gets the most recently used item, whose connection or
 // cache is likeliest to still be warm.
 //
-// Serving callers in order keeps their waits even. Where waiters race for
-// each returned item, the fastest win again and again, and a caller slow to
-// come back, after a redial or over a high-latency link, can wait far
-// longer than the rest or starve. In a List it keeps its place in line.
-//
 // Take returns a [Ticket] holding the caller's place in line. Its Value waits
 // for admission, and its Release gives the item back:
 //
@@ -52,7 +47,9 @@ var (
 
 // List pools reusable items of type Item.
 //
-// It hands items added with [List.Add] to callers in arrival order. Unused
+// It hands items added with [List.Add] to callers of [List.Take] in arrival
+// order, so a caller slow to come back, after a redial or over a slow link,
+// keeps its place instead of losing each item to faster callers. Unused
 // items wait in a LIFO stack, so the next caller gets the most recently
 // used, warmest item. A caller gives an item back by releasing its [Ticket].
 //
