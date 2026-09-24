@@ -41,9 +41,12 @@ the turn. The package's VM example uses two such lists to share a host's CPUs
 and memory among VMs of different sizes, strictly in arrival order, in about
 thirty lines.
 
-If you don't need a hard limit on creation or first-come service, a buffered
-channel is simpler. `sync.Pool` is for reusing temporary allocations; it
-doesn't limit how many resources exist, and it doesn't order callers.
+Unlike a buffered channel, a list hands out the most recently returned item
+instead of the one idle longest, holds your place in line without blocking so
+you can get ready while you wait, and takes an item back only once no matter
+how many times you release it. A channel is simpler when none of that matters.
+`sync.Pool` is for reusing temporary allocations; it doesn't limit how many
+resources exist, and it doesn't order callers.
 
 API details and examples are in the
 [package documentation](https://pkg.go.dev/blake.io/wait).

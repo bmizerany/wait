@@ -19,8 +19,10 @@
 // package's VM example shares a host's CPUs and memory among VMs with two
 // such Lists, serving callers strictly in arrival order.
 //
-// Use a buffered channel when FIFO order and warm reuse do not matter. Use [sync.Pool] for temporary allocation reuse, not for a bounded
-// resource pool.
+// Unlike a buffered channel, a List hands out the most recently released
+// item rather than the one idle longest, holds a caller's place in line
+// without blocking, and takes each item back only once. Use [sync.Pool] for
+// temporary allocation reuse, not for a bounded resource pool.
 package wait
 
 import (
