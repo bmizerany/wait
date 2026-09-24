@@ -4,8 +4,9 @@
 
 Package `wait` controls access to scarce things like connections, device
 handles, worker capacity, and API quota, when you need both a hard limit and
-fair service. Callers wait their turn in the order they arrived. Nobody creates
-past the limit, and nobody keeps racing for whatever comes back next.
+fair service. You set the limit by how many items you add; the list never
+creates more. Callers wait their turn in the order they arrived, and nobody
+keeps racing for whatever comes back next.
 
 An item that comes back goes straight to the caller that has waited longest,
 never to one that arrives a moment later, so no caller is passed over while

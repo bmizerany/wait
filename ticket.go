@@ -8,7 +8,9 @@ import "context"
 // Value waits for admission. Release gives the item back to the List, or
 // leaves the line if the Ticket is still waiting. The first Release ends
 // the Ticket and every copy of it: after that, Value returns
-// [ErrReleased], and Release does nothing. The zero Ticket is ended.
+// [ErrReleased], and Release does nothing. A Ticket that failed in Take,
+// without joining the line, has nothing to release; its Value keeps
+// returning the same error. The zero Ticket is ended.
 //
 // The holder of an admitted Ticket that is never released owns its item
 // outright. A Ticket still waiting keeps its place until its ctx is done or

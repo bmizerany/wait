@@ -81,8 +81,8 @@ type List[Item any] struct {
 // never blocks; the Ticket's Value waits.
 //
 // To take only a ready item, pass a ctx that is already done: the Ticket
-// then holds a ready item or fails with ctx's cause, without joining the
-// line.
+// then holds a ready item or fails with ctx's cause, or with [ErrClosed]
+// after Close, without joining the line.
 func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 	l.mu.Lock()
 	defer l.mu.Unlock()
