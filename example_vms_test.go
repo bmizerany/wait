@@ -70,6 +70,7 @@ func Example_vms() {
 		if err := h.Acquire(ctx, small); err != nil {
 			log.Fatal(err)
 		}
+		defer h.Release(small)
 		fmt.Println("running", small)
 		close(done)
 	}()
