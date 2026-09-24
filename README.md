@@ -32,9 +32,9 @@ whoever takes it next usually finds a connection ready. The package's slot
 example shows how.
 
 A `List` holding a single item is a fair lock: whoever holds the item has
-the turn. The package's gate example uses two such lists to admit requests
-of different sizes, like VMs with different CPU and disk needs, against a
-shared budget, strictly in arrival order.
+the turn. The package's VM example uses two such lists to share a host's CPUs
+and memory among VMs of different sizes, strictly in arrival order, in about
+thirty lines.
 
 If you don't need a hard limit on creation or first-come service, a buffered
 channel is simpler. `sync.Pool` is for reusing temporary allocations; it

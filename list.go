@@ -16,8 +16,8 @@
 //	}
 //
 // A List of one item is a fair lock: holding the item is your turn. The
-// package's gate example builds admission against shared capacity from two
-// such Lists.
+// package's VM example shares a host's CPUs and memory among VMs with two
+// such Lists, serving callers strictly in arrival order.
 //
 // Use a buffered channel when FIFO order and warm reuse do not matter. Use [sync.Pool] for temporary allocation reuse, not for a bounded
 // resource pool.
