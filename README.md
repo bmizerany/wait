@@ -7,10 +7,17 @@ handles, worker capacity, and API quota, when you need both a hard limit and
 fair service. Callers wait their turn in the order they arrived. Nobody creates
 past the limit, and nobody keeps racing for whatever comes back next.
 
+Serving callers in order also keeps their waits even. In a pool where waiters
+race for each item that comes back, the fastest callers win again and again,
+and a caller that is slow to return, after a redial or over a high-latency
+link, can wait far longer than the rest or starve outright. Here it keeps its
+place in line.
+
 `wait.List` is a pool of the items you add with `Add`. Waiting callers get
 items in arrival order. Idle items sit in a LIFO stack, so the next caller gets
-the most recently used one, which is the likeliest to still be warm. `MaxWaiters` caps how many callers can wait, and a
-context lets a caller give up or wait only until a deadline.
+the most recently used one, which is the likeliest to still be warm.
+`MaxWaiters` caps how many callers can wait, and a context lets a caller give
+up or wait only until a deadline.
 
 `Take` puts you in line and hands you a `Ticket`. The ticket's `Value` waits
 your turn, and its `Release` gives the item back. Releasing twice, or releasing
