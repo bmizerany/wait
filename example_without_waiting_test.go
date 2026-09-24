@@ -7,27 +7,27 @@ import (
 	"blake.io/wait"
 )
 
-// now is already done, so Take with it takes only what is available at
-// once: a ready item, or capacity that fits, and never a place in line.
-// Make it once and use it everywhere, instead of a new context per call.
-var now = func() context.Context {
+// withoutWaiting is already done, so Take with it takes only an item that
+// is ready at once, and never a place in line. Make it once and use it
+// everywhere, instead of a new context per call.
+var withoutWaiting = func() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	return ctx
 }()
 
-func Example_now() {
+func Example_withoutWaiting() {
 	var conns wait.List[string]
 	conns.Add("conn-a")
 
-	t := conns.Take(now)
+	t := conns.Take(withoutWaiting)
 	defer t.Release()
 	if c, err := t.Value(); err == nil {
 		fmt.Println("took", c)
 	}
 	// Nothing else is ready, so this Take fails at once and holds nothing
 	// to release.
-	if _, err := conns.Take(now).Value(); err != nil {
+	if _, err := conns.Take(withoutWaiting).Value(); err != nil {
 		fmt.Println("no conn ready:", err)
 	}
 
