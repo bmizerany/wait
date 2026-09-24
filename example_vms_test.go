@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"sync"
 
 	"blake.io/wait"
 )
@@ -53,30 +52,32 @@ func (h *Host) Acquire(ctx context.Context, s Spec) error {
 // Release gives s back to the Host.
 func (h *Host) Release(s Spec) { h.back.Add(s) }
 
-// A host with 16 CPUs and 64 GB of memory. While the big VM runs, a small
-// one arrives: its CPUs fit, but its memory does not, so it waits its turn.
+// A host with 16 CPUs and 64 GB of memory. The second VM's CPUs fit beside
+// the first, but its memory does not, so it waits its turn.
 func Example_vms() {
-	h := NewHost(Spec{CPUs: 16, MemoryGB: 64})
-	var wg sync.WaitGroup
+	host := Spec{CPUs: 16, MemoryGB: 64}
+	h := NewHost(host)
+	ctx := context.Background()
 
-	run := func(s Spec, work func()) {
-		if err := h.Acquire(context.Background(), s); err != nil {
+	for _, s := range []Spec{
+		{CPUs: 8, MemoryGB: 48},
+		{CPUs: 4, MemoryGB: 32},
+	} {
+		if err := h.Acquire(ctx, s); err != nil {
 			log.Fatal(err)
 		}
-		defer h.Release(s)
-		fmt.Println("running", s)
-		work()
-		fmt.Println("stopping", s)
+		go func() {
+			defer h.Release(s)
+			fmt.Println("running", s)
+		}()
 	}
 
-	run(Spec{CPUs: 8, MemoryGB: 48}, func() {
-		wg.Go(func() { run(Spec{CPUs: 4, MemoryGB: 32}, func() {}) })
-	})
-	wg.Wait()
+	// Taking the whole host waits for every VM to stop.
+	if err := h.Acquire(ctx, host); err != nil {
+		log.Fatal(err)
+	}
 
 	// Output:
 	// running {8 48}
-	// stopping {8 48}
 	// running {4 32}
-	// stopping {4 32}
 }
