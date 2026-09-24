@@ -39,15 +39,14 @@ const (
 // once a waiter settles, only its Ticket's holder touches it, so Value can
 // find it settled and read v and err without the mutex.
 type waiter[V any] struct {
-	list    *List[V]
-	ch      chan struct{} // wakes Value; holds a token while settled and unread
-	ctx     context.Context
-	v       V // the admitted item
-	err     error
-	st      atomic.Uint32 // a state; stored after v and err
-	gen     atomic.Uint64
-	loading bool // New is creating an item on this waiter's behalf
-	queued  bool // joined the line, so ch may hold a token
+	list   *List[V]
+	ch     chan struct{} // wakes Value; holds a token while settled and unread
+	ctx    context.Context
+	v      V // the admitted item
+	err    error
+	st     atomic.Uint32 // a state; stored after v and err
+	gen    atomic.Uint64
+	queued bool // joined the line, so ch may hold a token
 }
 
 func (w *waiter[V]) state() state { return state(w.st.Load()) }
@@ -159,7 +158,7 @@ func (l *line[V]) recycle(w *waiter[V]) {
 		default:
 		}
 	}
-	w.ctx, w.v, w.err, w.loading, w.queued = nil, zero, nil, false, false
+	w.ctx, w.v, w.err, w.queued = nil, zero, nil, false
 	if l.nfree < len(l.spare) {
 		l.spare[l.nfree] = w
 		l.nfree++

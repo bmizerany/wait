@@ -11,34 +11,23 @@ import (
 
 func TestList(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := &List[int]{
-			MaxItems:   2,
-			MaxWaiters: 3,
-		}
-		var loads atomic.Int64
-		l.New = func() int { return int(loads.Add(1) - 1) }
+		l := &List[int]{MaxWaiters: 3}
+		l.Add(0)
+		l.Add(1)
 
-		checkLoads := func(want int64) {
-			t.Helper()
-			if got := loads.Load(); got != want {
-				t.Errorf("loads = %d, want %d", got, want)
-			}
+		tk := held(t, l.Take(t.Context())) // item 1, the warmest
+		tk.Release()                       // item 1 is on top again
+
+		a := held(t, l.Take(t.Context()))
+		b := held(t, l.Take(t.Context()))
+		if v, _ := a.Value(); v != 1 {
+			t.Errorf("a.Value() = %d, want 1", v)
+		}
+		if v, _ := b.Value(); v != 0 {
+			t.Errorf("b.Value() = %d, want 0", v)
 		}
 
-		tk := held(t, l.Take(t.Context()))
-		tk.Release() // item 0 is ready again
-
-		a := held(t, l.Take(t.Context())) // item 0, reused
-		b := held(t, l.Take(t.Context())) // item 1, created
-		if v, _ := a.Value(); v != 0 {
-			t.Errorf("a.Value() = %d, want 0", v)
-		}
-		if v, _ := b.Value(); v != 1 {
-			t.Errorf("b.Value() = %d, want 1", v)
-		}
-		checkLoads(2)
-
-		// MaxItems is reached: three Tickets wait, and a fourth is
+		// Both items are out: three Tickets wait, and a fourth is
 		// turned away.
 		var waiting [3]Ticket[int]
 		for i := range waiting {
@@ -53,13 +42,11 @@ func TestList(t *testing.T) {
 		if !l.Add(2) {
 			t.Error("Add(2) = false, want true")
 		}
-		for i, want := range []int{0, 1, 2} {
+		for i, want := range []int{1, 0, 2} {
 			if v, err := waiting[i].Value(); v != want || err != nil {
 				t.Errorf("waiting[%d].Value() = %d, %v, want %d, nil", i, v, err, want)
 			}
 		}
-		synctest.Wait()
-		checkLoads(2)
 
 		l.Close()
 		if l.Add(42) {
@@ -71,10 +58,7 @@ func TestList(t *testing.T) {
 func TestListTakeCancel(t *testing.T) {
 	t.Run("early cancel", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l := &List[int]{
-				MaxItems: 1,
-				New:      func() int { panic("should not call New") },
-			}
+			var l List[int]
 			ctx, cancel := context.WithCancel(t.Context())
 			cancel()
 
@@ -89,10 +73,7 @@ func TestListTakeCancel(t *testing.T) {
 	})
 
 	t.Run("early cancel with ready item", func(t *testing.T) {
-		l := &List[int]{
-			MaxItems: 1,
-			New:      func() int { panic("should not call New") },
-		}
+		var l List[int]
 		l.Add(42)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
@@ -171,7 +152,8 @@ func TestListSkipsCanceled(t *testing.T) {
 
 func TestListSkipsCanceledValue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := &List[int]{MaxItems: 1, New: func() int { return 42 }}
+		var l List[int]
+		l.Add(42)
 		holder := held(t, l.Take(t.Context()))
 		// Give the item back after ctx is canceled but before Value
 		// notices. It must go to the ready stack, not the canceled Ticket.
@@ -196,7 +178,8 @@ func TestListSkipsCanceledValue(t *testing.T) {
 
 func TestListAdmissionWins(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		l := &List[int]{MaxItems: 1, New: func() int { return 44 }}
+		var l List[int]
+		l.Add(44)
 		holder := held(t, l.Take(t.Context()))
 
 		ctx, cancel := context.WithCancel(t.Context())
@@ -271,9 +254,9 @@ func TestListCloseWaiting(t *testing.T) {
 func BenchmarkList(b *testing.B) {
 	b.Run("uncontended", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
-			l := &List[int]{
-				MaxItems: 10,
-				New:      func() int { return 42 },
+			var l List[int]
+			for range 10 {
+				l.Add(42)
 			}
 			for pb.Next() {
 				tk := l.Take(context.Background())
@@ -295,10 +278,9 @@ func BenchmarkList(b *testing.B) {
 		var tttt atomic.Int64 // total-time-to-take
 		var tttr atomic.Int64 // total-time-to-release
 
-		l := &List[int]{
-			MaxItems:   10,
-			MaxWaiters: 100,
-			New:        func() int { return 0 },
+		l := &List[int]{MaxWaiters: 100}
+		for range 10 {
+			l.Add(0)
 		}
 
 		b.RunParallel(func(pb *testing.PB) {
@@ -430,80 +412,5 @@ func TestListClose(t *testing.T) {
 		if _, err := l.Take(context.Background()).Value(); !errors.Is(err, ErrClosed) {
 			t.Errorf("Value() = %v, want ErrClosed", err)
 		}
-	})
-}
-
-func TestListNew(t *testing.T) {
-	t.Run("nil never creates", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var l List[int]
-			tk := l.Take(t.Context())
-			synctest.Wait()
-			if tk.Ready() {
-				t.Fatal("a List with nil New created an item")
-			}
-			l.Add(1)
-			if v, err := tk.Value(); v != 1 || err != nil {
-				t.Fatalf("Value() = %d, %v, want 1, nil", v, err)
-			}
-		})
-	})
-
-	t.Run("up to MaxItems", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var created atomic.Int64
-			l := &List[int]{
-				MaxItems: 2,
-				New:      func() int { return int(created.Add(1)) },
-			}
-			var tks [3]Ticket[int]
-			for i := range tks {
-				tks[i] = l.Take(t.Context())
-			}
-			synctest.Wait()
-			if !tks[0].Ready() || !tks[1].Ready() || tks[2].Ready() {
-				t.Fatalf("Ready() = %v, %v, %v, want true, true, false",
-					tks[0].Ready(), tks[1].Ready(), tks[2].Ready())
-			}
-			if n := created.Load(); n != 2 {
-				t.Fatalf("New calls = %d, want 2", n)
-			}
-			l.Add(42)
-			if v, err := tks[2].Value(); v != 42 || err != nil {
-				t.Fatalf("tks[2].Value() = %d, %v, want 42, nil", v, err)
-			}
-		})
-	})
-
-	t.Run("reuses before creating", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			var created atomic.Int64
-			l := &List[int]{New: func() int { return int(created.Add(1)) }}
-			held(t, l.Take(t.Context())).Release()
-			if v, err := l.Take(t.Context()).Value(); v != 1 || err != nil {
-				t.Fatalf("Value() = %d, %v, want the released item 1, nil", v, err)
-			}
-			if n := created.Load(); n != 1 {
-				t.Fatalf("New calls = %d, want 1", n)
-			}
-		})
-	})
-
-	t.Run("skips canceled", func(t *testing.T) {
-		synctest.Test(t, func(t *testing.T) {
-			create := make(chan struct{})
-			l := &List[int]{MaxItems: 1, New: func() int { <-create; return 1 }}
-			ctx, cancel := context.WithCancel(t.Context())
-			first := l.Take(ctx) // starts creating item 1
-			cancel()
-			second := l.Take(t.Context())
-			close(create) // item 1 arrives after first gave up
-			if v, err := second.Value(); v != 1 || err != nil {
-				t.Fatalf("second.Value() = %d, %v, want 1, nil", v, err)
-			}
-			if _, err := first.Value(); !errors.Is(err, context.Canceled) {
-				t.Fatalf("first.Value() = %v, want context.Canceled", err)
-			}
-		})
 	})
 }

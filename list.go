@@ -1,9 +1,9 @@
 // Package wait provides a first-come line for reusable items.
 //
-// A [List] pools items added with [List.Add] and can create more lazily up to a
-// limit. Queued callers get items in arrival order, so waiting is fair, and
-// unused items wait in a LIFO stack, so the next caller gets the most recently
-// used item, whose connection or cache is likeliest to still be warm.
+// A [List] pools items added with [List.Add]. Queued callers get items in
+// arrival order, so waiting is fair, and unused items wait in a LIFO stack,
+// so the next caller gets the most recently used item, whose connection or
+// cache is likeliest to still be warm.
 //
 // Take returns a [Ticket] holding the caller's place in line. Its Value waits
 // for admission, and its Release gives the item back:
@@ -19,8 +19,7 @@
 // package's gate example builds admission against shared capacity from two
 // such Lists.
 //
-// Use a buffered channel when FIFO order and lazy creation limits are not
-// needed. Use [sync.Pool] for temporary allocation reuse, not for a bounded
+// Use a buffered channel when FIFO order and warm reuse do not matter. Use [sync.Pool] for temporary allocation reuse, not for a bounded
 // resource pool.
 package wait
 
@@ -48,24 +47,18 @@ var (
 
 // List pools reusable items of type Item.
 //
-// It pools items added with [List.Add] and can create more lazily with New,
-// up to MaxItems. Queued callers receive items in FIFO order; unused items
-// wait in a LIFO stack, so the next caller gets the most recently used,
-// warmest item. A caller gives an item back by releasing its [Ticket], or
-// keeps it for good by not releasing it.
+// It hands items added with [List.Add] to callers in arrival order. Unused
+// items wait in a LIFO stack, so the next caller gets the most recently
+// used, warmest item. A caller gives an item back by releasing its [Ticket].
 //
-// The zero List creates nothing: it hands items added with Add to callers
-// in arrival order. List is safe for concurrent use.
+// A List never creates items. To create them lazily, keep them warm, or
+// replace broken ones, add items that do it themselves: a slot holding a
+// connection it dials in the background, say, as the package's slot
+// example shows.
+//
+// The zero List is empty and ready to use. List is safe for concurrent
+// use.
 type List[Item any] struct {
-	// MaxItems is the most items New creates. An item whose Ticket is never
-	// released still counts. Zero means no limit.
-	MaxItems int
-
-	// New creates an item, in its own goroutine, when a Ticket waits and
-	// MaxItems allows. If New is nil, the List never creates items: Tickets
-	// wait for items added with Add or released by other Tickets.
-	New func() Item
-
 	// MaxWaiters is the maximum number of Tickets waiting in line. A Take
 	// that would exceed it returns a Ticket whose Value reports
 	// ErrMaxWaiters. Zero means no limit.
@@ -73,20 +66,18 @@ type List[Item any] struct {
 
 	mu      sync.Mutex       // guards the fields below
 	ready   queue.Lifo[Item] // LIFO stack of ready items
-	loads   int              // number of items New has created or is creating
 	waiters line[Item]
 	closed  bool
 }
 
 // Take returns a Ticket for an item. If an item is ready, the Ticket holds it
 // already, even if the List is closed or ctx is done, so ready items drain
-// after Close like a channel. Otherwise the Ticket waits in line, and Take
-// starts creating an item if MaxItems allows. Take never blocks; the
-// Ticket's Value waits.
+// after Close like a channel. Otherwise the Ticket waits in line. Take
+// never blocks; the Ticket's Value waits.
 //
 // To take only a ready item, pass a ctx that is already done: the Ticket
 // then holds a ready item or fails with ctx's cause, without joining the
-// line or creating an item.
+// line.
 func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -104,7 +95,6 @@ func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 	if err != nil {
 		return Ticket[T]{err: err}
 	}
-	l.startNextLoadLocked()
 	return t
 }
 
@@ -140,29 +130,4 @@ func (l *List[T]) give(v T) {
 		return
 	}
 	l.ready.Push(v)
-}
-
-func (l *List[T]) startNextLoadLocked() {
-	if l.New == nil || l.MaxItems > 0 && l.loads >= l.MaxItems {
-		return
-	}
-	w := l.nextWaiterToLoadLocked()
-	if w == nil {
-		return
-	}
-	w.loading = true
-	l.loads++
-	newItem := l.New
-	go func() { l.Add(newItem()) }()
-}
-
-// nextWaiterToLoadLocked returns the first waiting Ticket's waiter that
-// no load is running for, or nil if none.
-func (l *List[T]) nextWaiterToLoadLocked() *waiter[T] {
-	for w := range l.waiters.q.Values() {
-		if !w.loading && w.ctx.Err() == nil {
-			return w
-		}
-	}
-	return nil
 }

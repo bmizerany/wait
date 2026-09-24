@@ -3,7 +3,6 @@ package wait
 import (
 	"context"
 	"errors"
-	"sync/atomic"
 	"testing"
 	"testing/synctest"
 )
@@ -123,30 +122,6 @@ func TestTicketReleaseWaiting(t *testing.T) {
 		}
 		if _, err := first.Value(); !errors.Is(err, ErrReleased) {
 			t.Fatalf("first.Value() = %v, want ErrReleased", err)
-		}
-	})
-}
-
-func TestTicketKeep(t *testing.T) {
-	synctest.Test(t, func(t *testing.T) {
-		var created atomic.Int64
-		l := &List[int]{
-			MaxItems: 1,
-			New:      func() int { return int(created.Add(1)) },
-		}
-		held(t, l.Take(t.Context())) // item 1, never released
-
-		waiter := l.Take(t.Context())
-		synctest.Wait()
-		if waiter.Ready() {
-			t.Fatal("New replaced a kept item")
-		}
-		l.Add(2) // the replacement comes from Add
-		if v, err := waiter.Value(); v != 2 || err != nil {
-			t.Fatalf("waiter.Value() = %d, %v, want 2, nil", v, err)
-		}
-		if n := created.Load(); n != 1 {
-			t.Fatalf("New calls = %d, want 1", n)
 		}
 	})
 }

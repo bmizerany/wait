@@ -11,10 +11,8 @@ import "context"
 // [ErrReleased], and Release does nothing. The zero Ticket is ended.
 //
 // The holder of an admitted Ticket that is never released owns its item
-// outright, for instance to close a broken connection rather than give it
-// back. The item still counts against MaxItems, so a List replaces it
-// only if someone adds a new item with [List.Add]. A Ticket still waiting
-// keeps its place until its ctx is done or it is released.
+// outright. A Ticket still waiting keeps its place until its ctx is done or
+// it is released.
 //
 // A Ticket is for use by one goroutine at a time.
 type Ticket[T any] struct {
