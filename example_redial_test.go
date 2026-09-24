@@ -32,7 +32,9 @@ func (c *conn) redial() {
 }
 
 // A caller that finds its connection broken redials it before the deferred
-// Release gives it back, so the next caller gets a fresh one.
+// Release gives it back, so the next caller gets a fresh one. Dropping the
+// conn instead would shrink the List for good, and once every conn is
+// dropped, callers wait forever.
 func Example_redial() {
 	var conns wait.List[*conn]
 	conns.Add(newConn("db"))

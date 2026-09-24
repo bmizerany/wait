@@ -55,7 +55,9 @@ var (
 // stack, so the next caller gets the most recently
 // used, warmest item. A caller gives an item back by releasing its [Ticket].
 //
-// A List never creates items. To dial ahead, or replace a broken
+// A List never creates items, so an item that is dropped rather than
+// released or replaced with Add is gone for good; drop them all, and every
+// Take waits until its ctx is done. To dial ahead, or replace a broken
 // connection, add items that do it themselves, as the package's redial
 // example shows.
 //
