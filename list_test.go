@@ -74,13 +74,18 @@ func TestListTakeCancel(t *testing.T) {
 
 	t.Run("early cancel with ready item", func(t *testing.T) {
 		var l List[int]
+		l.Add(41)
 		l.Add(42)
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
+		ctx, cancel := context.WithCancelCause(context.Background())
+		cancel(errStop)
 
-		// The ready item wins over the canceled context.
-		if v, err := l.Take(ctx).Value(); v != 42 || err != nil {
-			t.Errorf("Value() = %d, %v, want 42, nil", v, err)
+		// The canceled context wins, and the warmest item stays on top
+		// for the next caller.
+		if _, err := l.Take(ctx).Value(); err != errStop {
+			t.Errorf("Value() = %v, want errStop", err)
+		}
+		if v, err := tryTake(&l).Value(); v != 42 || err != nil {
+			t.Errorf("tryTake().Value() = %d, %v, want 42, nil", v, err)
 		}
 	})
 
@@ -170,26 +175,183 @@ func TestListSkipsCanceledValue(t *testing.T) {
 
 		cancel()
 		synctest.Wait()
-		if v, err := l.Take(done).Value(); v != 42 || err != nil {
-			t.Errorf("Take(done).Value() = %d, %v, want the released item 42, nil", v, err)
+		if v, err := tryTake(&l).Value(); v != 42 || err != nil {
+			t.Errorf("tryTake().Value() = %d, %v, want the released item 42, nil", v, err)
 		}
 	})
 }
 
-func TestListAdmissionWins(t *testing.T) {
+func TestListCancelWins(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l List[int]
 		l.Add(44)
 		holder := held(t, l.Take(t.Context()))
 
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, cancel := context.WithCancelCause(t.Context())
 		tk := l.Take(ctx)
+		next := l.Take(t.Context())
 		holder.Release() // admits tk
-		cancel()
-		if v, err := tk.Value(); v != 44 || err != nil {
-			t.Errorf("Value() = %d, %v, want 44, nil", v, err)
+		cancel(errStop)
+		if v, err := tk.Value(); err != errStop {
+			t.Errorf("Value() = %d, %v, want errStop", v, err)
+		}
+		if v, err := next.Value(); v != 44 || err != nil {
+			t.Fatalf("next.Value() = %d, %v, want the item tk gave back, 44, nil", v, err)
+		}
+
+		tk.Release() // must not give 44 back again
+		next.Release()
+		held(t, tryTake(&l))
+		if _, err := tryTake(&l).Value(); err == nil {
+			t.Fatal("item 44 was given back twice")
 		}
 	})
+}
+
+func TestListCancelWinsReady(t *testing.T) {
+	var l List[int]
+	l.Add(45)
+	l.Add(46)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	tk := l.Take(ctx) // holds 46 already
+	cancel(errStop)
+	if v, err := tk.Value(); err != errStop {
+		t.Errorf("Value() = %d, %v, want errStop", v, err)
+	}
+	if v, err := tryTake(&l).Value(); v != 46 || err != nil {
+		t.Errorf("tryTake().Value() = %d, %v, want 46 back on top, nil", v, err)
+	}
+}
+
+func TestListCancelAfterValue(t *testing.T) {
+	var l List[int]
+	l.Add(47)
+	ctx, cancel := context.WithCancel(t.Context())
+	tk := l.Take(ctx)
+	if v, err := tk.Value(); v != 47 || err != nil {
+		t.Fatalf("Value() = %d, %v, want 47, nil", v, err)
+	}
+
+	// Value has handed 47 out, so it stays out.
+	cancel()
+	if v, err := tk.Value(); v != 47 || err != nil {
+		t.Errorf("Value() after cancel = %d, %v, want 47, nil", v, err)
+	}
+	if _, err := tryTake(&l).Value(); err == nil {
+		t.Fatal("cancel gave back 47 while tk holds it")
+	}
+	tk.Release()
+	if v, err := tryTake(&l).Value(); v != 47 || err != nil {
+		t.Errorf("tryTake().Value() after Release = %d, %v, want 47, nil", v, err)
+	}
+}
+
+func TestListCancelWinsWaiting(t *testing.T) {
+	// Admission and cancellation both reach a Ticket blocked in Value
+	// before Value runs again. Whichever wakes it, cancellation wins.
+	for _, admitFirst := range []bool{true, false} {
+		synctest.Test(t, func(t *testing.T) {
+			var l List[int]
+			l.Add(48)
+			holder := held(t, l.Take(t.Context()))
+
+			ctx, cancel := context.WithCancel(t.Context())
+			tk := l.Take(ctx)
+			go func() {
+				if v, err := tk.Value(); !errors.Is(err, context.Canceled) {
+					t.Errorf("admitFirst=%v: Value() = %d, %v, want context.Canceled", admitFirst, v, err)
+				}
+			}()
+			synctest.Wait()
+
+			if admitFirst {
+				holder.Release() // admits tk and wakes Value
+				cancel()
+			} else {
+				cancel()         // wakes Value
+				holder.Release() // skips tk, whose ctx is done
+			}
+			synctest.Wait()
+			if v, err := tryTake(&l).Value(); v != 48 || err != nil {
+				t.Errorf("admitFirst=%v: tryTake().Value() = %d, %v, want 48, nil", admitFirst, v, err)
+			}
+		})
+	}
+}
+
+func TestTryTake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		l := &List[int]{MaxWaiters: 1}
+		if _, ok := l.TryTake(); ok {
+			t.Fatal("TryTake() on an empty List = true, want false")
+		}
+		l.Add(1)
+		l.Add(2)
+		tk, ok := l.TryTake()
+		if v, err := tk.Value(); !ok || v != 2 || err != nil {
+			t.Fatalf("TryTake() = %d, %v, %v, want the warmest item 2, nil, true", v, err, ok)
+		}
+		one := held(t, l.Take(t.Context()))
+
+		// Nothing is ready and the line is full. TryTake reports false
+		// without joining the line, so it neither fails with
+		// ErrMaxWaiters nor turns away the next caller.
+		ahead := l.Take(t.Context())
+		if _, ok := l.TryTake(); ok {
+			t.Fatal("TryTake() with nothing ready = true, want false")
+		}
+		if n := l.waiters.q.Len(); n != 1 {
+			t.Errorf("line holds %d waiters after TryTake, want 1", n)
+		}
+		tk.Release() // admits ahead
+		if v, err := ahead.Value(); v != 2 || err != nil {
+			t.Errorf("ahead.Value() = %d, %v, want 2, nil", v, err)
+		}
+
+		one.Release()
+		l.Close()
+		tk, ok = l.TryTake()
+		if v, err := tk.Value(); !ok || v != 1 || err != nil {
+			t.Errorf("TryTake() after Close = %d, %v, %v, want 1, nil, true", v, err, ok)
+		}
+		if _, ok := l.TryTake(); ok {
+			t.Error("TryTake() after draining = true, want false")
+		}
+	})
+}
+
+func TestTicketReleaseAdmitted(t *testing.T) {
+	// A Ticket released after admission but before Value gives its item
+	// back: to the Ticket behind it, else to the ready items.
+	synctest.Test(t, func(t *testing.T) {
+		var l List[int]
+		tk := l.Take(t.Context())
+		behind := l.Take(t.Context())
+		l.Add(3) // admits tk
+		tk.Release()
+		if v, err := behind.Value(); v != 3 || err != nil {
+			t.Errorf("behind.Value() = %d, %v, want 3, nil", v, err)
+		}
+		tk = l.Take(t.Context())
+		l.Add(4) // admits tk
+		tk.Release()
+		if v, err := tryTake(&l).Value(); v != 4 || err != nil {
+			t.Errorf("tryTake().Value() = %d, %v, want 4, nil", v, err)
+		}
+	})
+}
+
+func TestListTakeDoneReady(t *testing.T) {
+	var l List[int]
+	l.Add(1)
+	tk := l.Take(done)
+	tk.Release() // nothing to release: the item never left the List
+	if _, err := tk.Value(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Value() after Release = %v, want context.Canceled", err)
+	}
+	if v, err := tryTake(&l).Value(); v != 1 || err != nil {
+		t.Errorf("tryTake().Value() = %d, %v, want 1, nil", v, err)
+	}
 }
 
 func TestListCloseWaiting(t *testing.T) {
@@ -252,6 +414,33 @@ func TestListCloseWaiting(t *testing.T) {
 }
 
 func BenchmarkList(b *testing.B) {
+	b.Run("ready", func(b *testing.B) {
+		var l List[int]
+		l.Add(42)
+		for b.Loop() {
+			tk := l.Take(b.Context())
+			if _, err := tk.Value(); err != nil {
+				b.Fatal("Value:", err)
+			}
+			tk.Release()
+		}
+	})
+
+	// Each Ticket joins the line, and releasing the held one admits it.
+	b.Run("queued", func(b *testing.B) {
+		var l List[int]
+		l.Add(42)
+		holder := l.Take(b.Context())
+		for b.Loop() {
+			next := l.Take(b.Context())
+			holder.Release()
+			if _, err := next.Value(); err != nil {
+				b.Fatal("Value:", err)
+			}
+			holder = next
+		}
+	})
+
 	b.Run("uncontended", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			var l List[int]
@@ -317,13 +506,13 @@ func TestListClose(t *testing.T) {
 			t.Error("Add(999) after Close = true, want false")
 		}
 		for {
-			tk := l.Take(done)
+			tk := l.Take(context.Background()) // never waits after Close
 			v, err := tk.Value()
 			if err != nil {
 				break
 			}
 			if v < 0 || v > 4 {
-				t.Errorf("Take(done) after Close = %d, want 0 through 4", v)
+				t.Errorf("Take after Close = %d, want 0 through 4", v)
 			}
 			// Not released: drained items are ours to dispose of.
 		}
@@ -368,6 +557,23 @@ func TestListClose(t *testing.T) {
 		}
 	})
 
+	t.Run("take after with done ctx", func(t *testing.T) {
+		var l List[int]
+		l.Add(6)
+		l.Close()
+
+		// The done ctx wins over both the ready item and ErrClosed.
+		if _, err := l.Take(done).Value(); !errors.Is(err, context.Canceled) {
+			t.Errorf("Take(done).Value() = %v, want context.Canceled", err)
+		}
+		if v, err := l.Take(context.Background()).Value(); v != 6 || err != nil {
+			t.Errorf("Value() = %d, %v, want 6, nil", v, err)
+		}
+		if _, err := l.Take(done).Value(); !errors.Is(err, context.Canceled) {
+			t.Errorf("Take(done).Value() after draining = %v, want context.Canceled", err)
+		}
+	})
+
 	t.Run("drain ready items", func(t *testing.T) {
 		var l List[int]
 		for i := range 5 {
@@ -399,8 +605,8 @@ func TestListClose(t *testing.T) {
 
 		// A released item stays drainable, so its owner can dispose of it.
 		tk.Release()
-		if v, err := l.Take(done).Value(); v != 5 || err != nil {
-			t.Errorf("Take(done).Value() = %d, %v, want the released item 5, nil", v, err)
+		if v, err := l.Take(context.Background()).Value(); v != 5 || err != nil {
+			t.Errorf("Value() = %d, %v, want the released item 5, nil", v, err)
 		}
 	})
 

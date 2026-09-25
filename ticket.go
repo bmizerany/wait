@@ -12,9 +12,9 @@ import "context"
 // without joining the line, has nothing to release; its Value keeps
 // returning the same error. The zero Ticket is ended.
 //
-// The holder of an admitted Ticket that is never released owns its item
-// outright. A Ticket still waiting keeps its place until its ctx is done or
-// it is released.
+// Once Value returns an item, the holder of a Ticket that is never
+// released owns the item outright. A Ticket still waiting keeps its place
+// until its ctx is done or it is released.
 //
 // A Ticket is for use by one goroutine at a time.
 type Ticket[T any] struct {
@@ -24,9 +24,13 @@ type Ticket[T any] struct {
 }
 
 // Value returns the item the Ticket was admitted with, waiting for
-// admission if necessary. If the Ticket failed, Value returns the
-// error: [ErrClosed], [ErrMaxWaiters], or the cause of the context passed
-// to Take. An admission that races with cancellation wins.
+// admission if necessary. If the Ticket failed, Value returns the error:
+// [ErrClosed], [ErrMaxWaiters], or the cause of the context passed to
+// Take. Cancellation wins over admission: if the context is done before
+// Value returns the item, even an item admitted first, Value gives the
+// item back to the List and fails the Ticket with the context's cause.
+// Once Value returns an item, it returns that item until the Ticket is
+// released.
 func (t Ticket[T]) Value() (T, error) {
 	var zero T
 	w := t.w
@@ -36,11 +40,19 @@ func (t Ticket[T]) Value() (T, error) {
 		}
 		return zero, ErrReleased
 	}
-	if st := w.state(); w.gen.Load() != t.gen {
+	st := w.state()
+	if w.gen.Load() != t.gen {
 		return zero, ErrReleased
-	} else if st != waiting {
-		// Settled: only this Ticket's holder touches w now.
+	}
+	// Once settled, w is touched only by this Ticket's holder.
+	switch st {
+	case taken, failed:
 		return w.v, w.err
+	case admitted:
+		if w.ctx.Err() == nil {
+			w.st.Store(uint32(taken))
+			return w.v, nil
+		}
 	}
 	mu := &w.list.mu
 	mu.Lock()
@@ -66,6 +78,18 @@ func (t Ticket[T]) Value() (T, error) {
 		default:
 		}
 	}
+	if w.state() == admitted {
+		if w.ctx.Err() == nil {
+			w.st.Store(uint32(taken))
+		} else {
+			// Not w.fail: this Value is the only one that could wait on
+			// w, and admission may already have left a token in w.ch.
+			v := w.v
+			w.v, w.err = zero, context.Cause(w.ctx)
+			w.st.Store(uint32(failed))
+			w.list.give(v)
+		}
+	}
 	return w.v, w.err
 }
 
@@ -84,8 +108,9 @@ func (t Ticket[T]) Ready() bool {
 	return w.state() != waiting || w.ctx.Err() != nil
 }
 
-// Release ends the Ticket. If it was admitted, Release gives its item back
-// to the List; if it is still waiting, Release takes it out of the line.
+// Release ends the Ticket. If it holds an item, Release gives the item
+// back to the List; if it is still waiting, Release takes it out of the
+// line.
 func (t Ticket[T]) Release() {
 	w := t.w
 	if w == nil {
@@ -101,7 +126,7 @@ func (t Ticket[T]) Release() {
 	case waiting:
 		l.waiters.leave(w)
 		l.waiters.recycle(w)
-	case admitted:
+	case admitted, taken:
 		v := w.v
 		l.waiters.recycle(w)
 		l.give(v)

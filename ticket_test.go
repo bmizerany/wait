@@ -7,12 +7,19 @@ import (
 	"testing/synctest"
 )
 
-// done is already done, so Take with it takes only what is available at once.
+// done is already done, so Take with it always fails.
 var done = func() context.Context {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	return ctx
 }()
+
+// tryTake returns l.TryTake's Ticket, which is the zero Ticket, whose
+// Value reports ErrReleased, if no item is ready.
+func tryTake[T any](l *List[T]) Ticket[T] {
+	tk, _ := l.TryTake()
+	return tk
+}
 
 // held waits for tk to be admitted, failing t if it is not, and returns tk.
 func held[T any](t *testing.T, tk Ticket[T]) Ticket[T] {
@@ -32,7 +39,7 @@ func TestTicketReleaseTwice(t *testing.T) {
 		tk.Release()
 		tk.Release() // must not store item 1 twice
 		held(t, l.Take(t.Context()))
-		if _, err := l.Take(done).Value(); err == nil {
+		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("item 1 was stored twice")
 		}
 	})
@@ -50,7 +57,7 @@ func TestTicketReleaseTwiceWaiter(t *testing.T) {
 		if v, err := waiter.Value(); v != 1 || err != nil {
 			t.Fatalf("waiter.Value() = %d, %v, want 1, nil", v, err)
 		}
-		if _, err := l.Take(done).Value(); err == nil {
+		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("item 1 was stored while waiter holds it")
 		}
 	})
@@ -67,7 +74,7 @@ func TestTicketStale(t *testing.T) {
 		dup := cur
 
 		old.Release() // must not release cur
-		if _, err := l.Take(done).Value(); err == nil {
+		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("stale Release gave back cur's item")
 		}
 		if _, err := old.Value(); !errors.Is(err, ErrReleased) {
@@ -75,8 +82,8 @@ func TestTicketStale(t *testing.T) {
 		}
 		dup.Release()
 		cur.Release() // dup already released it
-		held(t, l.Take(done))
-		if _, err := l.Take(done).Value(); err == nil {
+		held(t, tryTake(&l))
+		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("releasing cur and dup stored item 1 twice")
 		}
 	})
@@ -95,7 +102,7 @@ func TestTicketZero(t *testing.T) {
 
 func TestTicketFailed(t *testing.T) {
 	var l List[int]
-	tk := l.Take(done) // nothing ready, so it fails at once
+	tk := l.Take(done) // fails at once
 	if !tk.Ready() {
 		t.Error("Ready() = false, want true")
 	}
@@ -104,8 +111,8 @@ func TestTicketFailed(t *testing.T) {
 		t.Fatalf("Value() = %v, want context.Canceled", err)
 	}
 	l.Add(1)
-	if v, err := l.Take(done).Value(); v != 1 || err != nil {
-		t.Fatalf("Take(done).Value() = %d, %v, want 1, nil", v, err)
+	if v, err := tryTake(&l).Value(); v != 1 || err != nil {
+		t.Fatalf("tryTake().Value() = %d, %v, want 1, nil", v, err)
 	}
 }
 

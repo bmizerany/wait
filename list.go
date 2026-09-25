@@ -75,25 +75,23 @@ type List[Item any] struct {
 	closed  bool
 }
 
-// Take returns a Ticket for an item. If an item is ready, the Ticket holds it
-// already, even if the List is closed or ctx is done, so ready items drain
-// after Close like a channel. Otherwise the Ticket waits in line. Take
-// never blocks; the Ticket's Value waits.
-//
-// To take only a ready item, pass a ctx that is already done: the Ticket
-// then holds a ready item or fails with ctx's cause, or with [ErrClosed]
-// after Close, without joining the line.
+// Take returns a Ticket for an item. If ctx is done, the Ticket fails with
+// ctx's cause, even if an item is ready or the List is closed. Otherwise,
+// if an item is ready, the Ticket holds it already; if the List is closed,
+// the Ticket fails with [ErrClosed]; and if neither, the Ticket waits in
+// line. Take never blocks; the Ticket's Value waits. To take only a ready
+// item, use [List.TryTake].
 func (l *List[T]) Take(ctx context.Context) Ticket[T] {
+	if ctx.Err() != nil {
+		return Ticket[T]{err: context.Cause(ctx)}
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if v, ok := l.ready.Pop(); ok {
-		return l.waiters.ticket(l, v)
+		return l.waiters.ticket(l, ctx, v)
 	}
 	if l.closed {
 		return Ticket[T]{err: ErrClosed}
-	}
-	if ctx.Err() != nil {
-		return Ticket[T]{err: context.Cause(ctx)}
 	}
 	var zero T
 	t, err := l.waiters.join(l, ctx, zero, l.MaxWaiters)
@@ -101,6 +99,19 @@ func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 		return Ticket[T]{err: err}
 	}
 	return t
+}
+
+// TryTake returns a Ticket holding the most recently used ready item, and
+// true, or the zero Ticket and false if no item is ready. It never waits
+// or joins the line, and it takes ready items even after [List.Close].
+func (l *List[T]) TryTake() (Ticket[T], bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	v, ok := l.ready.Pop()
+	if !ok {
+		return Ticket[T]{}, false
+	}
+	return l.waiters.ticket(l, context.Background(), v), true
 }
 
 // Add adds v to the List as a new item. It hands v to the longest-waiting
@@ -117,10 +128,11 @@ func (l *List[T]) Add(v T) bool {
 }
 
 // Close fails waiting Tickets with [ErrClosed]. After Close, [List.Take]
-// never waits, whatever its ctx: it returns a ready item while any remain,
-// then a Ticket failed with ErrClosed. Items given back by releasing their
-// Tickets after Close join the ready items. Later [List.Add] calls return
-// false. Close is idempotent.
+// never waits: unless its ctx is done, it returns a ready item while any
+// remain, then a Ticket failed with ErrClosed. To drain the ready items
+// whatever the ctx, as at shutdown, use [List.TryTake]. Items given back
+// after Close join the ready items. Later [List.Add] calls return false.
+// Close is idempotent.
 func (l *List[T]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

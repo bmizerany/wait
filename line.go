@@ -23,21 +23,24 @@ type state uint32
 
 const (
 	waiting  state = iota // in the line
-	admitted              // holds v
+	admitted              // holds v, which Value has not returned
+	taken                 // holds v, which Value has returned
 	failed                // holds err
 )
 
 // A waiter backs a Ticket. It is waiting in the line, then admitted or
 // failed. Leaving the line and settling happen in one critical section,
 // so a waiter is never both in the line and settled. Settling also puts
-// a token in ch to wake a Value blocked on it.
+// a token in ch to wake a Value blocked on it. Value then moves an
+// admitted waiter to taken, or, if its ctx is done, gives v back and moves
+// it to failed.
 //
 // When its Ticket is released, the waiter's gen is bumped before it
 // returns to the pool, so a stale copy of the Ticket no longer matches it.
 //
 // The List's mutex guards every field, but st and gen are also atomic:
 // once a waiter settles, only its Ticket's holder touches it, so Value can
-// find it settled and read v and err without the mutex.
+// find it settled, read v and err, and move it to taken without the mutex.
 type waiter[V any] struct {
 	list   *List[V]
 	ch     chan struct{} // wakes Value; holds a token while settled and unread
@@ -65,10 +68,10 @@ func (l *line[V]) get(list *List[V]) *waiter[V] {
 	return w
 }
 
-// ticket returns an already admitted Ticket for v.
-func (l *line[V]) ticket(list *List[V], v V) Ticket[V] {
+// ticket returns a Ticket for ctx already admitted with v.
+func (l *line[V]) ticket(list *List[V], ctx context.Context, v V) Ticket[V] {
 	w := l.get(list)
-	w.v = v
+	w.ctx, w.v = ctx, v
 	w.st.Store(uint32(admitted))
 	return Ticket[V]{w: w, gen: w.gen.Load()}
 }
