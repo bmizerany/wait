@@ -102,8 +102,8 @@ func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 }
 
 // TryTake returns a Ticket holding the most recently used ready item, and
-// true, or the zero Ticket and false if no item is ready. It never waits
-// or joins the line, and it takes ready items even after [List.Close].
+// true, or the zero Ticket and false if no item is ready. Unlike Take, it
+// never joins the line.
 func (l *List[T]) TryTake() (Ticket[T], bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -127,12 +127,10 @@ func (l *List[T]) Add(v T) bool {
 	return true
 }
 
-// Close fails waiting Tickets with [ErrClosed]. After Close, [List.Take]
-// never waits: unless its ctx is done, it returns a ready item while any
-// remain, then a Ticket failed with ErrClosed. To drain the ready items
-// whatever the ctx, as at shutdown, use [List.TryTake]. Items given back
-// after Close join the ready items. Later [List.Add] calls return false.
-// Close is idempotent.
+// Close fails every waiting Ticket with [ErrClosed] and makes later
+// [List.Add] calls return false. After Close, [List.Take] never waits: it
+// returns the remaining ready items, including any given back later, then
+// fails with ErrClosed. Close is idempotent.
 func (l *List[T]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -32,8 +32,8 @@ func ExampleList() {
 	// using conn-b
 }
 
-// At shutdown, Close the List and drain its ready items with TryTake,
-// which takes them whatever the shutdown's ctx.
+// At shutdown, Close the List and drain its ready items. After Close,
+// Take never waits: it returns each ready item, then fails with ErrClosed.
 func ExampleList_Close() {
 	var conns wait.List[string]
 	conns.Add("conn-a")
@@ -41,20 +41,21 @@ func ExampleList_Close() {
 
 	conns.Close()
 	for {
-		t, ok := conns.TryTake()
-		if !ok {
+		c, err := conns.Take(context.Background()).Value()
+		if err != nil {
+			fmt.Println(err)
 			break
 		}
-		c, _ := t.Value()
 		fmt.Println("closing", c) // not released: it is ours to close
 	}
 
 	// Output:
 	// closing conn-b
 	// closing conn-a
+	// closed
 }
 
-// TryTake takes a ready item without waiting, and never joins the line.
+// TryTake takes an idle item if there is one, and never joins the line.
 func ExampleList_TryTake() {
 	var conns wait.List[string]
 	conns.Add("conn-a")
