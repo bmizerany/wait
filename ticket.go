@@ -93,21 +93,6 @@ func (t Ticket[T]) Value() (T, error) {
 	return w.v, w.err
 }
 
-// Ready reports whether Value would return without waiting.
-func (t Ticket[T]) Ready() bool {
-	w := t.w
-	if w == nil {
-		return true
-	}
-	if w.gen.Load() != t.gen || w.state() != waiting {
-		return true
-	}
-	mu := &w.list.mu
-	mu.Lock()
-	defer mu.Unlock()
-	return w.state() != waiting || w.ctx.Err() != nil
-}
-
 // Release ends the Ticket. If it holds an item, Release gives the item
 // back to the List; if it is still waiting, Release takes it out of the
 // line.

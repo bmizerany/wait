@@ -63,9 +63,6 @@ func TestListTakeCancel(t *testing.T) {
 			cancel()
 
 			tk := l.Take(ctx)
-			if !tk.Ready() {
-				t.Error("Ready() = false, want true")
-			}
 			if _, err := tk.Value(); !errors.Is(err, context.Canceled) {
 				t.Errorf("Value() = %v, want context.Canceled", err)
 			}
@@ -101,9 +98,6 @@ func TestListTakeCancel(t *testing.T) {
 				}
 			}()
 			synctest.Wait()
-			if tk.Ready() {
-				t.Error("Ready() = true while waiting, want false")
-			}
 
 			cancel(errStop)
 			synctest.Wait()
@@ -142,9 +136,6 @@ func TestListSkipsCanceled(t *testing.T) {
 		cancel(errStop)
 
 		next := l.Take(t.Context())
-		if next.Ready() {
-			t.Fatalf("next Ready() = true, want false (canceled Ticket still holds its place)")
-		}
 		l.Add(33)
 		if v, err := next.Value(); v != 33 || err != nil {
 			t.Errorf("next.Value() = %d, %v, want 33, nil", v, err)
@@ -549,9 +540,6 @@ func TestListClose(t *testing.T) {
 		var l List[int]
 		l.Close()
 		tk := l.Take(context.Background())
-		if !tk.Ready() {
-			t.Error("Ready() = false, want true")
-		}
 		if _, err := tk.Value(); !errors.Is(err, ErrClosed) {
 			t.Errorf("Value() = %v, want ErrClosed", err)
 		}

@@ -91,9 +91,6 @@ func TestTicketStale(t *testing.T) {
 
 func TestTicketZero(t *testing.T) {
 	var tk Ticket[int]
-	if !tk.Ready() {
-		t.Error("Ready() = false, want true")
-	}
 	if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
 		t.Errorf("Value() = %v, want ErrReleased", err)
 	}
@@ -103,9 +100,6 @@ func TestTicketZero(t *testing.T) {
 func TestTicketFailed(t *testing.T) {
 	var l List[int]
 	tk := l.Take(done) // fails at once
-	if !tk.Ready() {
-		t.Error("Ready() = false, want true")
-	}
 	tk.Release()
 	if _, err := tk.Value(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Value() = %v, want context.Canceled", err)
