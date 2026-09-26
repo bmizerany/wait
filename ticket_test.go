@@ -15,7 +15,7 @@ var done = func() context.Context {
 }()
 
 // tryTake returns l.TryTake's Ticket, which is the zero Ticket, whose
-// Value reports ErrReleased, if no item is ready.
+// Value reports ErrDone, if no item is ready.
 func tryTake[T any](l *List[T]) Ticket[T] {
 	tk, _ := l.TryTake()
 	return tk
@@ -77,8 +77,8 @@ func TestTicketStale(t *testing.T) {
 		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("stale Done gave back cur's item")
 		}
-		if _, err := old.Value(); !errors.Is(err, ErrReleased) {
-			t.Fatalf("stale Value() = %v, want ErrReleased", err)
+		if _, err := old.Value(); !errors.Is(err, ErrDone) {
+			t.Fatalf("stale Value() = %v, want ErrDone", err)
 		}
 		dup.Done()
 		cur.Done() // dup already ended it
@@ -91,8 +91,8 @@ func TestTicketStale(t *testing.T) {
 
 func TestTicketZero(t *testing.T) {
 	var tk Ticket[int]
-	if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
-		t.Errorf("Value() = %v, want ErrReleased", err)
+	if _, err := tk.Value(); !errors.Is(err, ErrDone) {
+		t.Errorf("Value() = %v, want ErrDone", err)
 	}
 	tk.Done()
 }
@@ -121,8 +121,8 @@ func TestTicketDoneWaiting(t *testing.T) {
 		if v, err := second.Value(); v != 1 || err != nil {
 			t.Fatalf("second.Value() = %d, %v, want 1, nil", v, err)
 		}
-		if _, err := first.Value(); !errors.Is(err, ErrReleased) {
-			t.Fatalf("first.Value() = %v, want ErrReleased", err)
+		if _, err := first.Value(); !errors.Is(err, ErrDone) {
+			t.Fatalf("first.Value() = %v, want ErrDone", err)
 		}
 	})
 }
@@ -136,8 +136,8 @@ func TestTicketLeave(t *testing.T) {
 		if !tk.Leave() {
 			t.Fatal("Leave() of a waiting Ticket = false, want true")
 		}
-		if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
-			t.Errorf("Value() after Leave = %v, want ErrReleased", err)
+		if _, err := tk.Value(); !errors.Is(err, ErrDone) {
+			t.Errorf("Value() after Leave = %v, want ErrDone", err)
 		}
 		if cp := tk; cp.Leave() {
 			t.Error("second Leave() on a copy = true, want false")

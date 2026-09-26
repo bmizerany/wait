@@ -45,10 +45,10 @@ var (
 	// before the Ticket is admitted.
 	ErrClosed = errors.New("closed")
 
-	// ErrReleased is returned by [Ticket.Value] after [Ticket.Done], or
-	// after [Ticket.Leave] takes a waiting Ticket out of the line, and for
-	// the zero Ticket.
-	ErrReleased = errors.New("ticket released")
+	// ErrDone is returned by [Ticket.Value] after [Ticket.Done], after
+	// [Ticket.Leave] takes a waiting Ticket out of the line, and for the
+	// zero Ticket.
+	ErrDone = errors.New("ticket done")
 )
 
 // List pools reusable items of type Item.

@@ -98,7 +98,7 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 	switch {
 	case err == nil && doneBefore:
 		t.Errorf("Value() = %d, nil for a ctx done before Value", v)
-	case err != nil && !errors.Is(err, errStop) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrReleased):
+	case err != nil && !errors.Is(err, errStop) && !errors.Is(err, ErrClosed) && !errors.Is(err, ErrDone):
 		t.Errorf("Value() = %v", err)
 	}
 	if err == nil && r.IntN(2) == 0 {

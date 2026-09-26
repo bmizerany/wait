@@ -9,7 +9,7 @@ import "context"
 // to the List; call Done on every Ticket, with defer. To keep the item,
 // or replace it with [List.Add], call Leave first: Done then gives
 // nothing back. The first Done ends the Ticket and every copy of it:
-// after that, Value returns [ErrReleased], and Leave and Done do
+// after that, Value returns [ErrDone], and Leave and Done do
 // nothing. A Ticket that failed in Take, without joining the line, has
 // nothing to give back; its Value keeps returning the same error. The
 // zero Ticket is ended.
@@ -40,11 +40,11 @@ func (t Ticket[T]) Value() (T, error) {
 		if t.err != nil {
 			return zero, t.err
 		}
-		return zero, ErrReleased
+		return zero, ErrDone
 	}
 	st := w.state()
 	if w.gen.Load() != t.gen {
-		return zero, ErrReleased
+		return zero, ErrDone
 	}
 	// Once settled, w is touched only by this Ticket's holder.
 	switch st {
@@ -70,7 +70,7 @@ func (t Ticket[T]) Value() (T, error) {
 		}
 		mu.Lock()
 		if w.gen.Load() != t.gen {
-			return zero, ErrReleased
+			return zero, ErrDone
 		}
 		if w.state() == waiting && w.list.waiters.leave(w) {
 			w.fail(context.Cause(w.ctx))
@@ -101,7 +101,7 @@ func (t Ticket[T]) Value() (T, error) {
 // for its holder, and Done no longer gives it back. Once Leave returns
 // true, Value never waits: it returns the item, or, if Leave took the
 // Ticket out of the line, the cause of its ctx if done, else
-// [ErrReleased]. Leave returns false after Done, for a Ticket that
+// [ErrDone]. Leave returns false after Done, for a Ticket that
 // failed in Take, and for the zero Ticket.
 func (t Ticket[T]) Leave() bool {
 	w := t.w
@@ -117,7 +117,7 @@ func (t Ticket[T]) Leave() bool {
 	w.left = true
 	if w.state() == waiting {
 		l.waiters.leave(w)
-		err := ErrReleased
+		err := ErrDone
 		if w.ctx.Err() != nil {
 			err = context.Cause(w.ctx)
 		}
