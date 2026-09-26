@@ -30,14 +30,14 @@ func held[T any](t *testing.T, tk Ticket[T]) Ticket[T] {
 	return tk
 }
 
-func TestTicketReleaseTwice(t *testing.T) {
+func TestTicketDoneTwice(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l List[int]
 		l.Add(1)
 
 		tk := held(t, l.Take(t.Context()))
-		tk.Release()
-		tk.Release() // must not store item 1 twice
+		tk.Done()
+		tk.Done() // must not store item 1 twice
 		held(t, l.Take(t.Context()))
 		if _, err := tryTake(&l).Value(); err == nil {
 			t.Fatal("item 1 was stored twice")
@@ -45,15 +45,15 @@ func TestTicketReleaseTwice(t *testing.T) {
 	})
 }
 
-func TestTicketReleaseTwiceWaiter(t *testing.T) {
+func TestTicketDoneTwiceWaiter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l List[int]
 		l.Add(1)
 
 		tk := held(t, l.Take(t.Context()))
 		waiter := l.Take(t.Context())
-		tk.Release() // hands item 1 to waiter
-		tk.Release() // must not hand it out again
+		tk.Done() // hands item 1 to waiter
+		tk.Done() // must not hand it out again
 		if v, err := waiter.Value(); v != 1 || err != nil {
 			t.Fatalf("waiter.Value() = %d, %v, want 1, nil", v, err)
 		}
@@ -69,22 +69,22 @@ func TestTicketStale(t *testing.T) {
 		l.Add(1)
 
 		old := held(t, l.Take(t.Context()))
-		old.Release()
+		old.Done()
 		cur := held(t, l.Take(t.Context())) // usually reuses old's waiter
 		dup := cur
 
-		old.Release() // must not release cur
+		old.Done() // must not end cur
 		if _, err := tryTake(&l).Value(); err == nil {
-			t.Fatal("stale Release gave back cur's item")
+			t.Fatal("stale Done gave back cur's item")
 		}
 		if _, err := old.Value(); !errors.Is(err, ErrReleased) {
 			t.Fatalf("stale Value() = %v, want ErrReleased", err)
 		}
-		dup.Release()
-		cur.Release() // dup already released it
+		dup.Done()
+		cur.Done() // dup already ended it
 		held(t, tryTake(&l))
 		if _, err := tryTake(&l).Value(); err == nil {
-			t.Fatal("releasing cur and dup stored item 1 twice")
+			t.Fatal("Done on cur and dup stored item 1 twice")
 		}
 	})
 }
@@ -94,13 +94,13 @@ func TestTicketZero(t *testing.T) {
 	if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
 		t.Errorf("Value() = %v, want ErrReleased", err)
 	}
-	tk.Release()
+	tk.Done()
 }
 
 func TestTicketFailed(t *testing.T) {
 	var l List[int]
 	tk := l.Take(done) // fails at once
-	tk.Release()
+	tk.Done()
 	if _, err := tk.Value(); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Value() = %v, want context.Canceled", err)
 	}
@@ -110,12 +110,12 @@ func TestTicketFailed(t *testing.T) {
 	}
 }
 
-func TestTicketReleaseWaiting(t *testing.T) {
+func TestTicketDoneWaiting(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l List[int]
 		first := l.Take(t.Context())
 		second := l.Take(t.Context())
-		first.Release() // leaves the line; second is at its front
+		first.Done() // leaves the line; second is at its front
 
 		l.Add(1)
 		if v, err := second.Value(); v != 1 || err != nil {
@@ -143,12 +143,12 @@ func TestTicketLeave(t *testing.T) {
 			t.Error("second Leave() on a copy = true, want false")
 		}
 		l.Add(1) // goes to the ready items, not to tk
-		tk.Release()
+		tk.Done()
 		if v, err := tryTake(&l).Value(); v != 1 || err != nil {
 			t.Fatalf("tryTake().Value() = %d, %v, want 1, nil", v, err)
 		}
 
-		// Admitted, unread: Leave keeps the item for Value, and Release
+		// Admitted, unread: Leave keeps the item for Value, and Done
 		// doesn't give it back.
 		l.Add(2)
 		tk = l.Take(t.Context())
@@ -158,12 +158,13 @@ func TestTicketLeave(t *testing.T) {
 		if v, err := tk.Value(); v != 2 || err != nil {
 			t.Errorf("Value() after Leave = %d, %v, want 2, nil", v, err)
 		}
-		tk.Release()
+		tk.Done()
 		if _, ok := l.TryTake(); ok {
-			t.Error("Release after Leave gave the item back")
+			t.Error("Done after Leave gave the item back")
 		}
 		l.Add(5)
-		held(t, l.Take(t.Context())).Release() // reuses tk's waiter, which must not stay left
+		// This Take reuses tk's waiter, which must not stay left.
+		held(t, l.Take(t.Context())).Done()
 		if v, err := tryTake(&l).Value(); v != 5 || err != nil {
 			t.Errorf("tryTake().Value() = %d, %v, want 5 given back, nil", v, err)
 		}
@@ -174,9 +175,9 @@ func TestTicketLeave(t *testing.T) {
 		if !tk.Leave() {
 			t.Fatal("Leave() after Value = false, want true")
 		}
-		tk.Release()
+		tk.Done()
 		if _, ok := l.TryTake(); ok {
-			t.Error("Release after Value and Leave gave the item back")
+			t.Error("Done after Value and Leave gave the item back")
 		}
 
 		// Failed in line.
@@ -189,11 +190,11 @@ func TestTicketLeave(t *testing.T) {
 		if _, err := tk.Value(); err != errStop {
 			t.Errorf("Value() = %v, want errStop", err)
 		}
-		tk.Release()
+		tk.Done()
 
-		// Released, failed in Take, and zero: nothing to leave.
+		// Done, failed in Take, and zero: nothing to leave.
 		if tk.Leave() {
-			t.Error("Leave() after Release = true, want false")
+			t.Error("Leave() after Done = true, want false")
 		}
 		if l.Take(done).Leave() {
 			t.Error("Leave() of a Ticket that failed in Take = true, want false")
@@ -233,23 +234,23 @@ func TestTicketAllocs(t *testing.T) {
 		if _, err := tk.Value(); err != nil {
 			t.Fatal("Value:", err)
 		}
-		tk.Release()
+		tk.Done()
 	})
 
-	// Queued: the next Ticket joins the line, and releasing the held one
+	// Queued: the next Ticket joins the line, and Done on the held one
 	// admits it.
 	holder := held(t, l.Take(ctx))
 	checkAllocs(t, "queued Take", func() {
 		next := l.Take(ctx)
-		holder.Release()
+		holder.Done()
 		if _, err := next.Value(); err != nil {
 			t.Fatal("Value:", err)
 		}
 		holder = next
 	})
-	holder.Release()
+	holder.Done()
 
-	// Leave, replace, and Release: the Ticket is reused all the same.
+	// Leave, replace, and Done: the Ticket is reused all the same.
 	checkAllocs(t, "Leave", func() {
 		tk := l.Take(ctx)
 		v, err := tk.Value()
@@ -259,7 +260,7 @@ func TestTicketAllocs(t *testing.T) {
 		if tk.Leave() {
 			l.Add(v)
 		}
-		tk.Release()
+		tk.Done()
 	})
 }
 

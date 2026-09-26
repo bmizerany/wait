@@ -30,7 +30,7 @@ func Example_batch() {
 			for err == nil && n > cap(b)-len(b) {
 				l = &next
 				aside := l.Take(ctx) // keep a place before passing the turn on
-				t.Release()
+				t.Done()
 				t = aside
 				b, err = t.Value()
 			}

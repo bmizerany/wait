@@ -19,13 +19,13 @@ the most recently used one, which is the likeliest to still be warm.
 up or wait only until a deadline.
 
 `Take` puts you in line and hands you a `Ticket`. The ticket's `Value` waits
-your turn, and its `Release` gives the item back. Releasing twice, or releasing
-a ticket that never got in, does nothing. To keep the item instead, or replace
-a broken one with `Add`, call `Leave` before the deferred `Release`.
+your turn, and its `Done` gives the item back. Calling `Done` twice, or on a
+ticket that never got in, does nothing. To keep the item instead, or replace a
+broken one with `Add`, call `Leave` before the deferred `Done`.
 
 ```go
 t := conns.Take(ctx)
-defer t.Release()
+defer t.Done()
 c, err := t.Value()
 if err != nil {
 	return err
@@ -45,7 +45,7 @@ thirty lines.
 Unlike a buffered channel, a list hands out the most recently returned item
 instead of the one idle longest, holds your place in line without blocking so
 you can get ready while you wait, and takes an item back only once no matter
-how many times you release it. A channel is simpler when none of that matters.
+how many times you call `Done`. A channel is simpler when none of that matters.
 `sync.Pool` is for reusing temporary allocations; it doesn't limit how many
 resources exist, and it doesn't order callers.
 

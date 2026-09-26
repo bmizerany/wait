@@ -10,7 +10,7 @@ import (
 
 func TestListChaos(t *testing.T) {
 	// Goroutines take items every way there is, cancel before, during and
-	// after Value, leave, release twice and through copies, and in some
+	// after Value, leave, call Done twice and through copies, and in some
 	// rounds one of them closes the List midway. Every item must end up
 	// kept or drained exactly once.
 	const workers, ops = 8, 300
@@ -63,9 +63,9 @@ func TestListChaos(t *testing.T) {
 }
 
 // chaos takes an item from l one random way and checks what Value says.
-// If mayKeep, chaos sometimes keeps the item, leaving or never releasing
-// its Ticket, and returns it and true. Otherwise the item goes back, by
-// Release or by Leave and Add.
+// If mayKeep, chaos sometimes keeps the item, leaving or never calling
+// Done on its Ticket, and returns it and true. Otherwise the item goes
+// back, by Done or by Leave and Add.
 //
 // With at most one item kept per goroutine and two items per goroutine in
 // the List, a Take whose ctx is never canceled is always served.
@@ -88,7 +88,7 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 	left := false
 	switch r.IntN(6) {
 	case 0:
-		tk.Release() // before Value: leaves the line or gives the item back
+		tk.Done() // before Value: leaves the line or gives the item back
 	case 1:
 		left = tk.Leave() // before Value: Value then never waits
 	}
@@ -111,7 +111,7 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 		left = tk.Leave()
 	}
 	if err == nil && left {
-		tk.Release() // ends the Ticket, giving nothing back
+		tk.Done() // ends the Ticket, giving nothing back
 		if mayKeep && r.IntN(2) == 0 || !l.Add(v) {
 			return v, true // kept, or Add refused it after Close
 		}
@@ -122,7 +122,7 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 	}
 
 	cp := tk
-	cp.Release()
-	tk.Release() // the copy's Release ended tk too
+	cp.Done()
+	tk.Done() // the copy's Done ended tk too
 	return 0, false
 }

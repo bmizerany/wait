@@ -6,23 +6,23 @@
 // cache is likeliest to still be warm.
 //
 // Take returns a [Ticket] holding the caller's place in line. Its Value waits
-// for admission, and its Release gives the item back:
+// for admission, and its Done gives the item back:
 //
 //	t := conns.Take(ctx)
-//	defer t.Release()
+//	defer t.Done()
 //	c, err := t.Value()
 //	if err != nil {
 //		return err
 //	}
 //
 // To keep the item instead, or replace a broken one with [List.Add], call
-// [Ticket.Leave] before the deferred Release.
+// [Ticket.Leave] before the deferred Done.
 //
 // A List of one item is a fair lock: holding the item is your turn. The
 // package's VM example shares a host's CPUs and memory among VMs with two
 // such Lists, serving callers strictly in arrival order.
 //
-// Unlike a buffered channel, a List hands out the most recently released
+// Unlike a buffered channel, a List hands out the most recently returned
 // item rather than the one idle longest, holds a caller's place in line
 // without blocking, and takes each item back only once. Use [sync.Pool] for
 // temporary allocation reuse, not for a bounded resource pool.
@@ -45,21 +45,22 @@ var (
 	// before the Ticket is admitted.
 	ErrClosed = errors.New("closed")
 
-	// ErrReleased is returned by [Ticket.Value] after the Ticket is
-	// released or leaves the line while waiting, and for the zero Ticket.
+	// ErrReleased is returned by [Ticket.Value] after [Ticket.Done], or
+	// after [Ticket.Leave] takes a waiting Ticket out of the line, and for
+	// the zero Ticket.
 	ErrReleased = errors.New("ticket released")
 )
 
 // List pools reusable items of type Item.
 //
 // It hands items added with [List.Add] to callers of [List.Take] in arrival
-// order: a released item goes straight to the caller that has waited
+// order: a returned item goes straight to the caller that has waited
 // longest, never to one that arrives later. Unused items wait in a LIFO
 // stack, so the next caller gets the most recently
-// used, warmest item. A caller gives an item back by releasing its [Ticket].
+// used, warmest item. A caller gives an item back with [Ticket.Done].
 //
 // A List never creates items, so an item that is dropped rather than
-// released or replaced with Add is gone for good; drop them all, and every
+// given back or replaced with Add is gone for good; drop them all, and every
 // Ticket's Value waits until its ctx is done. To dial ahead, or replace a
 // broken connection, add items that do it themselves, as the package's
 // redial example shows.
@@ -119,7 +120,7 @@ func (l *List[T]) TryTake() (Ticket[T], bool) {
 
 // Add adds v to the List as a new item. It hands v to the longest-waiting
 // Ticket, or stores it for later. Add returns false after [List.Close].
-// To give back an item taken from the List, release its Ticket instead.
+// To give back an item taken from the List, use [Ticket.Done] instead.
 func (l *List[T]) Add(v T) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()

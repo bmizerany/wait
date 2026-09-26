@@ -8,7 +8,7 @@ import (
 	"blake.io/wait"
 )
 
-// A List of two connections. A released connection is the next one
+// A List of two connections. A returned connection is the next one
 // taken, while it is still warm.
 func ExampleList() {
 	var conns wait.List[string]
@@ -17,7 +17,7 @@ func ExampleList() {
 
 	use := func() {
 		t := conns.Take(context.Background())
-		defer t.Release()
+		defer t.Done()
 		c, err := t.Value()
 		if err != nil {
 			log.Fatal(err)
@@ -46,7 +46,7 @@ func ExampleList_Close() {
 			fmt.Println(err)
 			break
 		}
-		fmt.Println("closing", c) // not released: it is ours to close
+		fmt.Println("closing", c) // not given back: it is ours to close
 	}
 
 	// Output:
@@ -61,7 +61,7 @@ func ExampleList_TryTake() {
 	conns.Add("conn-a")
 
 	if t, ok := conns.TryTake(); ok {
-		defer t.Release()
+		defer t.Done()
 		c, _ := t.Value()
 		fmt.Println("took", c)
 	}
@@ -76,7 +76,7 @@ func ExampleList_TryTake() {
 
 // A caller that finds its connection broken replaces it. Leave keeps the
 // broken one from going back to the List, and Add puts a new one in its
-// place. The deferred Release still ends the Ticket, but gives nothing
+// place. The deferred Done still ends the Ticket, but gives nothing
 // back.
 func ExampleTicket_Leave() {
 	var conns wait.List[string]
@@ -85,7 +85,7 @@ func ExampleTicket_Leave() {
 
 	use := func(broken bool) {
 		t := conns.Take(context.Background())
-		defer t.Release()
+		defer t.Done()
 		c, err := t.Value()
 		if err != nil {
 			log.Fatal(err)

@@ -35,7 +35,7 @@ const (
 // admitted waiter to taken, or, if its ctx is done, gives v back and moves
 // it to failed.
 //
-// When its Ticket is released, the waiter's gen is bumped before it
+// When its Ticket is done, the waiter's gen is bumped before it
 // returns to the pool, so a stale copy of the Ticket no longer matches it.
 //
 // The List's mutex guards every field, but st and gen are also atomic:
@@ -50,7 +50,7 @@ type waiter[V any] struct {
 	st     atomic.Uint32 // a state; stored after v and err
 	gen    atomic.Uint64
 	queued bool // joined the line, so ch may hold a token
-	left   bool // Leave returned true; Release gives nothing back
+	left   bool // Leave returned true; Done gives nothing back
 }
 
 func (w *waiter[V]) state() state { return state(w.st.Load()) }
@@ -151,7 +151,7 @@ func (l *line[V]) close() {
 	}
 }
 
-// recycle returns w to the pool once its Ticket is released. Bumping gen
+// recycle returns w to the pool once its Ticket is done. Bumping gen
 // makes every copy of the Ticket stale.
 func (l *line[V]) recycle(w *waiter[V]) {
 	var zero V

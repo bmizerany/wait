@@ -5,17 +5,17 @@ import "context"
 // A Ticket is a place in a [List]'s line and, once admitted, the item it
 // was admitted with.
 //
-// Value waits for admission. Release ends the Ticket, giving its item
-// back to the List; release every Ticket, with defer. To keep the item,
-// or replace it with [List.Add], call Leave first: Release then gives
-// nothing back. The first Release ends the Ticket and every copy of it:
-// after that, Value returns [ErrReleased], and Leave and Release do
+// Value waits for admission. Done ends the Ticket, giving its item back
+// to the List; call Done on every Ticket, with defer. To keep the item,
+// or replace it with [List.Add], call Leave first: Done then gives
+// nothing back. The first Done ends the Ticket and every copy of it:
+// after that, Value returns [ErrReleased], and Leave and Done do
 // nothing. A Ticket that failed in Take, without joining the line, has
-// nothing to release; its Value keeps returning the same error. The zero
-// Ticket is ended.
+// nothing to give back; its Value keeps returning the same error. The
+// zero Ticket is ended.
 //
 // Once Value returns an item, the holder of a Ticket that is never
-// released owns the item outright. A Ticket still waiting keeps its place
+// done owns the item outright. A Ticket still waiting keeps its place
 // until its ctx is done or it leaves.
 //
 // A Ticket is for use by one goroutine at a time.
@@ -32,7 +32,7 @@ type Ticket[T any] struct {
 // Value returns the item, even an item admitted first, Value gives the
 // item back to the List and fails the Ticket with the context's cause.
 // Once Value returns an item, it returns that item until the Ticket is
-// released.
+// done.
 func (t Ticket[T]) Value() (T, error) {
 	var zero T
 	w := t.w
@@ -98,10 +98,10 @@ func (t Ticket[T]) Value() (T, error) {
 // Leave takes the Ticket out of the line if it is still waiting, and
 // reports whether this is the first Leave of the Ticket or its copies. An
 // admitted Ticket has left the line already; Leave then keeps its item
-// for its holder, and Release no longer gives it back. Once Leave returns
+// for its holder, and Done no longer gives it back. Once Leave returns
 // true, Value never waits: it returns the item, or, if Leave took the
 // Ticket out of the line, the cause of its ctx if done, else
-// [ErrReleased]. Leave returns false after Release, for a Ticket that
+// [ErrReleased]. Leave returns false after Done, for a Ticket that
 // failed in Take, and for the zero Ticket.
 func (t Ticket[T]) Leave() bool {
 	w := t.w
@@ -126,10 +126,10 @@ func (t Ticket[T]) Leave() bool {
 	return true
 }
 
-// Release ends the Ticket and every copy of it. If the Ticket is still
-// waiting, Release takes it out of the line; if it holds an item and has
-// not left, Release gives the item back to the List.
-func (t Ticket[T]) Release() {
+// Done ends the Ticket and every copy of it. If the Ticket is still
+// waiting, Done takes it out of the line; if it holds an item and has
+// not left, Done gives the item back to the List.
+func (t Ticket[T]) Done() {
 	w := t.w
 	if w == nil {
 		return
