@@ -32,8 +32,8 @@ func ExampleList() {
 	// using conn-b
 }
 
-// At shutdown, Close the List and drain its ready items. After Close,
-// Take never waits: it returns each ready item, then fails with ErrClosed.
+// At shutdown, Close the List and drain its ready items. After Close, Take
+// returns each ready item, then fails with ErrClosed.
 func ExampleList_Close() {
 	var conns wait.List[string]
 	conns.Add("conn-a")

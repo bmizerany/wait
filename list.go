@@ -57,9 +57,9 @@ var (
 //
 // A List never creates items, so an item that is dropped rather than
 // released or replaced with Add is gone for good; drop them all, and every
-// Take waits until its ctx is done. To dial ahead, or replace a broken
-// connection, add items that do it themselves, as the package's redial
-// example shows.
+// Ticket's Value waits until its ctx is done. To dial ahead, or replace a
+// broken connection, add items that do it themselves, as the package's
+// redial example shows.
 //
 // The zero List is empty and ready to use. List is safe for concurrent
 // use.
@@ -128,9 +128,9 @@ func (l *List[T]) Add(v T) bool {
 }
 
 // Close fails every waiting Ticket with [ErrClosed] and makes later
-// [List.Add] calls return false. After Close, [List.Take] never waits: it
-// returns the remaining ready items, including any given back later, then
-// fails with ErrClosed. Close is idempotent.
+// [List.Add] calls return false. After Close, [List.Take] returns the
+// remaining ready items, including any given back later, then fails with
+// ErrClosed. Close is idempotent.
 func (l *List[T]) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()

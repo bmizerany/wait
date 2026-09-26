@@ -88,7 +88,7 @@ func TestListTakeCancel(t *testing.T) {
 
 	t.Run("waiting cancel", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			l := new(List[int]) // creates nothing, so Take waits
+			l := new(List[int]) // creates nothing, so Value waits
 
 			ctx, cancel := context.WithCancelCause(t.Context())
 			tk := l.Take(ctx)
@@ -497,7 +497,7 @@ func TestListClose(t *testing.T) {
 			t.Error("Add(999) after Close = true, want false")
 		}
 		for {
-			tk := l.Take(context.Background()) // never waits after Close
+			tk := l.Take(context.Background()) // never joins the line after Close
 			v, err := tk.Value()
 			if err != nil {
 				break
