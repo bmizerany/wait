@@ -50,6 +50,7 @@ type waiter[V any] struct {
 	st     atomic.Uint32 // a state; stored after v and err
 	gen    atomic.Uint64
 	queued bool // joined the line, so ch may hold a token
+	left   bool // Leave returned true; Release gives nothing back
 }
 
 func (w *waiter[V]) state() state { return state(w.st.Load()) }
@@ -161,7 +162,7 @@ func (l *line[V]) recycle(w *waiter[V]) {
 		default:
 		}
 	}
-	w.ctx, w.v, w.err, w.queued = nil, zero, nil, false
+	w.ctx, w.v, w.err, w.queued, w.left = nil, zero, nil, false, false
 	if l.nfree < len(l.spare) {
 		l.spare[l.nfree] = w
 		l.nfree++

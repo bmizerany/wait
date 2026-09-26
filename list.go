@@ -15,6 +15,9 @@
 //		return err
 //	}
 //
+// To keep the item instead, or replace a broken one with [List.Add], call
+// [Ticket.Leave] before the deferred Release.
+//
 // A List of one item is a fair lock: holding the item is your turn. The
 // package's VM example shares a host's CPUs and memory among VMs with two
 // such Lists, serving callers strictly in arrival order.
@@ -43,7 +46,7 @@ var (
 	ErrClosed = errors.New("closed")
 
 	// ErrReleased is returned by [Ticket.Value] after the Ticket is
-	// released, and for the zero Ticket.
+	// released or leaves the line while waiting, and for the zero Ticket.
 	ErrReleased = errors.New("ticket released")
 )
 

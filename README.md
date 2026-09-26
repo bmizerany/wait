@@ -20,7 +20,8 @@ up or wait only until a deadline.
 
 `Take` puts you in line and hands you a `Ticket`. The ticket's `Value` waits
 your turn, and its `Release` gives the item back. Releasing twice, or releasing
-a ticket that never got in, does nothing.
+a ticket that never got in, does nothing. To keep the item instead, or replace
+a broken one with `Add`, call `Leave` before the deferred `Release`.
 
 ```go
 t := conns.Take(ctx)

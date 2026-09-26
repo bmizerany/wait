@@ -73,3 +73,33 @@ func ExampleList_TryTake() {
 	// took conn-a
 	// no conn ready
 }
+
+// A caller that finds its connection broken replaces it. Leave keeps the
+// broken one from going back to the List, and Add puts a new one in its
+// place. The deferred Release still ends the Ticket, but gives nothing
+// back.
+func ExampleTicket_Leave() {
+	var conns wait.List[string]
+	dials := 1
+	conns.Add("conn-1")
+
+	use := func(broken bool) {
+		t := conns.Take(context.Background())
+		defer t.Release()
+		c, err := t.Value()
+		if err != nil {
+			log.Fatal(err)
+		}
+		fmt.Println("using", c)
+		if broken && t.Leave() {
+			dials++
+			conns.Add(fmt.Sprintf("conn-%d", dials))
+		}
+	}
+	use(true) // conn-1 breaks
+	use(false)
+
+	// Output:
+	// using conn-1
+	// using conn-2
+}

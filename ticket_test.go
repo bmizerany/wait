@@ -127,6 +127,100 @@ func TestTicketReleaseWaiting(t *testing.T) {
 	})
 }
 
+func TestTicketLeave(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var l List[int]
+
+		// Waiting: Leave takes it out of the line, and Value doesn't wait.
+		tk := l.Take(t.Context())
+		if !tk.Leave() {
+			t.Fatal("Leave() of a waiting Ticket = false, want true")
+		}
+		if _, err := tk.Value(); !errors.Is(err, ErrReleased) {
+			t.Errorf("Value() after Leave = %v, want ErrReleased", err)
+		}
+		if cp := tk; cp.Leave() {
+			t.Error("second Leave() on a copy = true, want false")
+		}
+		l.Add(1) // goes to the ready items, not to tk
+		tk.Release()
+		if v, err := tryTake(&l).Value(); v != 1 || err != nil {
+			t.Fatalf("tryTake().Value() = %d, %v, want 1, nil", v, err)
+		}
+
+		// Admitted, unread: Leave keeps the item for Value, and Release
+		// doesn't give it back.
+		l.Add(2)
+		tk = l.Take(t.Context())
+		if !tk.Leave() {
+			t.Fatal("Leave() of an admitted Ticket = false, want true")
+		}
+		if v, err := tk.Value(); v != 2 || err != nil {
+			t.Errorf("Value() after Leave = %d, %v, want 2, nil", v, err)
+		}
+		tk.Release()
+		if _, ok := l.TryTake(); ok {
+			t.Error("Release after Leave gave the item back")
+		}
+		l.Add(5)
+		held(t, l.Take(t.Context())).Release() // reuses tk's waiter, which must not stay left
+		if v, err := tryTake(&l).Value(); v != 5 || err != nil {
+			t.Errorf("tryTake().Value() = %d, %v, want 5 given back, nil", v, err)
+		}
+
+		// Taken: the same, after Value.
+		l.Add(3)
+		tk = held(t, l.Take(t.Context()))
+		if !tk.Leave() {
+			t.Fatal("Leave() after Value = false, want true")
+		}
+		tk.Release()
+		if _, ok := l.TryTake(); ok {
+			t.Error("Release after Value and Leave gave the item back")
+		}
+
+		// Failed in line.
+		ctx, cancel := context.WithCancelCause(t.Context())
+		tk = l.Take(ctx)
+		cancel(errStop)
+		if !tk.Leave() {
+			t.Error("Leave() of a failed Ticket = false, want true")
+		}
+		if _, err := tk.Value(); err != errStop {
+			t.Errorf("Value() = %v, want errStop", err)
+		}
+		tk.Release()
+
+		// Released, failed in Take, and zero: nothing to leave.
+		if tk.Leave() {
+			t.Error("Leave() after Release = true, want false")
+		}
+		if l.Take(done).Leave() {
+			t.Error("Leave() of a Ticket that failed in Take = true, want false")
+		}
+		if (Ticket[int]{}).Leave() {
+			t.Error("Leave() of the zero Ticket = true, want false")
+		}
+	})
+}
+
+func TestTicketLeaveCanceled(t *testing.T) {
+	// Leave doesn't change the cancellation rule: an item Value hasn't
+	// returned goes back if ctx is done first.
+	var l List[int]
+	l.Add(4)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	tk := l.Take(ctx)
+	tk.Leave()
+	cancel(errStop)
+	if _, err := tk.Value(); err != errStop {
+		t.Errorf("Value() = %v, want errStop", err)
+	}
+	if v, err := tryTake(&l).Value(); v != 4 || err != nil {
+		t.Errorf("tryTake().Value() = %d, %v, want 4 back, nil", v, err)
+	}
+}
+
 func TestTicketAllocs(t *testing.T) {
 	if raceEnabled {
 		t.Skip("sync.Pool drops items at random under the race detector")
@@ -152,6 +246,20 @@ func TestTicketAllocs(t *testing.T) {
 			t.Fatal("Value:", err)
 		}
 		holder = next
+	})
+	holder.Release()
+
+	// Leave, replace, and Release: the Ticket is reused all the same.
+	checkAllocs(t, "Leave", func() {
+		tk := l.Take(ctx)
+		v, err := tk.Value()
+		if err != nil {
+			t.Fatal("Value:", err)
+		}
+		if tk.Leave() {
+			l.Add(v)
+		}
+		tk.Release()
 	})
 }
 

@@ -10,9 +10,9 @@ import (
 
 func TestListChaos(t *testing.T) {
 	// Goroutines take items every way there is, cancel before, during and
-	// after Value, release twice and through copies, and in some rounds
-	// one of them closes the List midway. Every item must end up kept or
-	// drained exactly once.
+	// after Value, leave, release twice and through copies, and in some
+	// rounds one of them closes the List midway. Every item must end up
+	// kept or drained exactly once.
 	const workers, ops = 8, 300
 	for seed := range uint64(30) {
 		var l List[int]
@@ -63,8 +63,9 @@ func TestListChaos(t *testing.T) {
 }
 
 // chaos takes an item from l one random way and checks what Value says.
-// If mayKeep, chaos sometimes keeps the item, never releasing its Ticket,
-// and returns it and true. Otherwise it releases the Ticket.
+// If mayKeep, chaos sometimes keeps the item, leaving or never releasing
+// its Ticket, and returns it and true. Otherwise the item goes back, by
+// Release or by Leave and Add.
 //
 // With at most one item kept per goroutine and two items per goroutine in
 // the List, a Take whose ctx is never canceled is always served.
@@ -84,8 +85,12 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 	default:
 		tk = l.Take(ctx)
 	}
-	if r.IntN(4) == 0 {
+	left := false
+	switch r.IntN(6) {
+	case 0:
 		tk.Release() // before Value: leaves the line or gives the item back
+	case 1:
+		left = tk.Leave() // before Value: Value then never waits
 	}
 
 	doneBefore := ctx.Err() != nil
@@ -101,6 +106,16 @@ func chaos(t *testing.T, l *List[int], r *rand.Rand, mayKeep bool) (int, bool) {
 		if v2, err := tk.Value(); v2 != v || err != nil {
 			t.Errorf("Value() after cancel = %d, %v, want %d, nil", v2, err, v)
 		}
+	}
+	if err == nil && !left && r.IntN(4) == 0 {
+		left = tk.Leave()
+	}
+	if err == nil && left {
+		tk.Release() // ends the Ticket, giving nothing back
+		if mayKeep && r.IntN(2) == 0 || !l.Add(v) {
+			return v, true // kept, or Add refused it after Close
+		}
+		return 0, false // replaced, here by itself
 	}
 	if err == nil && mayKeep && r.IntN(8) == 0 {
 		return v, true
