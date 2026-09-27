@@ -119,9 +119,7 @@ func (l *line[V]) admit(v V) {
 
 // leave removes w from the line and reports whether it was there.
 func (l *line[V]) leave(w *waiter[V]) bool {
-	n := l.q.Len()
-	l.q.DeleteFunc(func(q *waiter[V]) bool { return q == w })
-	return l.q.Len() < n
+	return l.q.DeleteOne(func(q *waiter[V]) bool { return q == w })
 }
 
 // prune fails every waiter whose ctx is done.

@@ -431,6 +431,34 @@ func BenchmarkList(b *testing.B) {
 		})
 	}
 
+	// A line of n waiters, where one leaves each op and another joins at
+	// the back: the oldest, as a timeout would, or the newest.
+	for _, oldest := range []bool{true, false} {
+		for _, n := range []int{10, 10000} {
+			name := fmt.Sprintf("leave=newest/line=%d", n)
+			if oldest {
+				name = fmt.Sprintf("leave=oldest/line=%d", n)
+			}
+			b.Run(name, func(b *testing.B) {
+				var l List[int]
+				tks := make([]Ticket[int], n)
+				for i := range tks {
+					tks[i] = l.Take(b.Context())
+				}
+				i := 0
+				for b.Loop() {
+					if oldest {
+						tks[i%n].Done()
+						tks[i%n] = l.Take(b.Context())
+						i++
+					} else {
+						l.Take(b.Context()).Done()
+					}
+				}
+			})
+		}
+	}
+
 	b.Run("ready", func(b *testing.B) {
 		var l List[int]
 		l.Add(42)
