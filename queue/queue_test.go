@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"fmt"
 	"slices"
 	"testing"
 )
@@ -264,5 +265,48 @@ func TestLifo(t *testing.T) {
 
 	if q.Len() != 0 {
 		t.Fatalf("expected 0, got %d", q.Len())
+	}
+}
+
+func BenchmarkFifo(b *testing.B) {
+	// A queue held at n values: each op shifts one out and unshifts it in.
+	for _, n := range []int{10, 1000, 10000} {
+		b.Run(fmt.Sprintf("steady/len=%d", n), func(b *testing.B) {
+			var q Fifo[int]
+			for i := range n {
+				q.Unshift(i)
+			}
+			b.ReportAllocs()
+			for b.Loop() {
+				v, _ := q.Shift()
+				q.Unshift(v)
+			}
+		})
+	}
+
+	// A queue of 10000 values: each op deletes the value at one end, as a
+	// timeout or a quick change of mind would, and unshifts it back in.
+	for _, front := range []bool{true, false} {
+		name := "deleteOne=back/len=10000"
+		if front {
+			name = "deleteOne=front/len=10000"
+		}
+		b.Run(name, func(b *testing.B) {
+			var q Fifo[int]
+			for i := range 10000 {
+				q.Unshift(i)
+			}
+			last := 9999
+			b.ReportAllocs()
+			for b.Loop() {
+				v := last
+				if front {
+					v, _ = q.Front()
+				}
+				q.DeleteOne(func(x int) bool { return x == v })
+				q.Unshift(v)
+				last = v
+			}
+		})
 	}
 }
