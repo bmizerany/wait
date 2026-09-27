@@ -123,11 +123,6 @@ func (q *Lifo[E]) Pop() (v E, ok bool) {
 	return v, true
 }
 
-// DeleteFunc removes each value for which f returns true.
-func (q *Lifo[E]) DeleteFunc(f func(E) bool) {
-	q.a = slices.DeleteFunc(q.a, f)
-}
-
 // Len returns the number of values in the stack.
 func (q *Lifo[T]) Len() int {
 	return len(q.a)
