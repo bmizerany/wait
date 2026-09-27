@@ -1,6 +1,9 @@
 package queue
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestFifo(t *testing.T) {
 	var q Fifo[int]
@@ -63,11 +66,67 @@ func TestFifoShiftReleasesTail(t *testing.T) {
 
 	for range 3 {
 		q.Shift()
-		for i, p := range q.a[len(q.a):cap(q.a)] {
-			if p != nil {
-				t.Fatalf("slot %d beyond Len() retains %p, want nil", len(q.a)+i, p)
-			}
+		checkReleased(t, &q)
+	}
+}
+
+// checkReleased fails t if a slot of q outside the queue holds a value.
+func checkReleased(t *testing.T, q *Fifo[*int]) {
+	t.Helper()
+	for i, p := range q.a[:cap(q.a)] {
+		if (i < q.head || i >= len(q.a)) && p != nil {
+			t.Fatalf("slot %d outside the queue retains %p, want nil", i, p)
 		}
+	}
+}
+
+func TestFifoChurn(t *testing.T) {
+	// A queue kept at a steady length moves values down as it goes. It
+	// keeps their order, releases what it removed, and stops allocating.
+	const n = 100
+	var q Fifo[*int]
+	next, want := 0, 0
+	push := func() {
+		v := next
+		q.Unshift(&v)
+		next++
+	}
+	churn := func() {
+		p, ok := q.Shift()
+		if !ok || *p != want {
+			t.Fatalf("Shift() = %v, %t, want %d", p, ok, want)
+		}
+		want++
+		push()
+	}
+	for range n {
+		push()
+	}
+	for range 10 * n {
+		churn()
+		checkReleased(t, &q)
+	}
+	var v int
+	if allocs := testing.AllocsPerRun(10*n, func() {
+		q.Shift()
+		q.Unshift(&v)
+	}); allocs != 0 {
+		t.Errorf("steady Shift and Unshift allocate %v times, want 0", allocs)
+	}
+}
+
+func TestFifoDeleteFunc(t *testing.T) {
+	var q Fifo[int]
+	for i := range 6 {
+		q.Unshift(i)
+	}
+	q.Shift()
+	q.DeleteFunc(func(v int) bool { return v%2 == 0 })
+	if vs := slices.Collect(q.Values()); !slices.Equal(vs, []int{1, 3, 5}) {
+		t.Errorf("after DeleteFunc, queue = %v, want [1 3 5]", vs)
+	}
+	if q.Len() != 3 {
+		t.Errorf("Len() = %d, want 3", q.Len())
 	}
 }
 

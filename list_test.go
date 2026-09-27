@@ -3,6 +3,7 @@ package wait
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -405,6 +406,31 @@ func TestListCloseWaiting(t *testing.T) {
 }
 
 func BenchmarkList(b *testing.B) {
+	// One item circulates through a line of n waiters: each op gives it to
+	// the front of the line and rejoins at the back.
+	for _, n := range []int{10, 1000, 10000} {
+		b.Run(fmt.Sprintf("line=%d", n), func(b *testing.B) {
+			var l List[int]
+			l.Add(1)
+			holder := l.Take(b.Context())
+			tks := make([]Ticket[int], n)
+			for i := range tks {
+				tks[i] = l.Take(b.Context())
+			}
+			i := 0
+			for b.Loop() {
+				next := tks[i%n]
+				holder.Done() // admits next, the front of the line
+				tks[i%n] = l.Take(b.Context())
+				holder = next
+				i++
+			}
+			if _, err := holder.Value(); err != nil {
+				b.Fatal("Value:", err)
+			}
+		})
+	}
+
 	b.Run("ready", func(b *testing.B) {
 		var l List[int]
 		l.Add(42)
