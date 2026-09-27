@@ -55,12 +55,6 @@ func (q *Fifo[E]) Shift() (v E, ok bool) {
 	return v, true
 }
 
-// DeleteFunc removes each value for which f returns true.
-func (q *Fifo[E]) DeleteFunc(f func(E) bool) {
-	kept := slices.DeleteFunc(q.a[q.head:], f)
-	q.a = q.a[:q.head+len(kept)]
-}
-
 // DeleteOne removes a value for which f returns true, if there is one,
 // and reports whether it did. It looks from both ends of the queue at
 // once, so it is quickest for values near either end. If f returns true

@@ -116,21 +116,6 @@ func TestFifoChurn(t *testing.T) {
 	}
 }
 
-func TestFifoDeleteFunc(t *testing.T) {
-	var q Fifo[int]
-	for i := range 6 {
-		q.Unshift(i)
-	}
-	q.Shift()
-	q.DeleteFunc(func(v int) bool { return v%2 == 0 })
-	if vs := slices.Collect(q.Values()); !slices.Equal(vs, []int{1, 3, 5}) {
-		t.Errorf("after DeleteFunc, queue = %v, want [1 3 5]", vs)
-	}
-	if q.Len() != 3 {
-		t.Errorf("Len() = %d, want 3", q.Len())
-	}
-}
-
 func TestFifoDeleteOne(t *testing.T) {
 	var q Fifo[int]
 	for i := range 10 {
