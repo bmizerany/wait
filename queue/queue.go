@@ -61,6 +61,41 @@ func (q *Fifo[E]) DeleteFunc(f func(E) bool) {
 	q.a = q.a[:q.head+len(kept)]
 }
 
+// DeleteOne removes a value for which f returns true, if there is one,
+// and reports whether it did. It looks from both ends of the queue at
+// once, so it is quickest for values near either end. If f returns true
+// for more than one value, which one DeleteOne removes is unspecified.
+func (q *Fifo[E]) DeleteOne(f func(E) bool) bool {
+	for i, j := q.head, len(q.a)-1; i <= j; i, j = i+1, j-1 {
+		if f(q.a[i]) {
+			q.deleteAt(i)
+			return true
+		}
+		if f(q.a[j]) {
+			q.deleteAt(j)
+			return true
+		}
+	}
+	return false
+}
+
+// deleteAt removes a[i], moving whichever side of it is shorter.
+func (q *Fifo[E]) deleteAt(i int) {
+	var zero E
+	if i-q.head < len(q.a)-1-i {
+		copy(q.a[q.head+1:i+1], q.a[q.head:i])
+		q.a[q.head] = zero
+		q.head++
+	} else {
+		copy(q.a[i:], q.a[i+1:])
+		q.a[len(q.a)-1] = zero
+		q.a = q.a[:len(q.a)-1]
+	}
+	if q.head == len(q.a) {
+		q.a, q.head = q.a[:0], 0
+	}
+}
+
 // Len returns the number of values in the queue.
 func (q *Fifo[E]) Len() int {
 	return len(q.a) - q.head

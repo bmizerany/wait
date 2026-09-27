@@ -130,6 +130,55 @@ func TestFifoDeleteFunc(t *testing.T) {
 	}
 }
 
+func TestFifoDeleteOne(t *testing.T) {
+	var q Fifo[int]
+	for i := range 10 {
+		q.Unshift(i)
+	}
+	q.Shift()
+	q.Shift()
+	want := []int{2, 3, 4, 5, 6, 7, 8, 9}
+	// Front, back, next to each end, the middle, a value not there, and
+	// then everything left.
+	for _, v := range []int{2, 9, 3, 8, 5, 42, 4, 6, 7} {
+		ok := q.DeleteOne(func(x int) bool { return x == v })
+		i := slices.Index(want, v)
+		if ok != (i >= 0) {
+			t.Errorf("DeleteOne(%d) = %t, want %t", v, ok, i >= 0)
+		}
+		if i >= 0 {
+			want = slices.Delete(want, i, i+1)
+		}
+		if vs := slices.Collect(q.Values()); !slices.Equal(vs, want) {
+			t.Fatalf("after DeleteOne(%d), queue = %v, want %v", v, vs, want)
+		}
+	}
+	if q.Len() != 0 || q.DeleteOne(func(int) bool { return true }) {
+		t.Errorf("empty queue: Len() = %d, or DeleteOne found a value", q.Len())
+	}
+	q.Unshift(1)
+	if v, ok := q.Shift(); v != 1 || !ok {
+		t.Errorf("Shift() after emptying = %d, %t, want 1, true", v, ok)
+	}
+}
+
+func TestFifoDeleteOneReleases(t *testing.T) {
+	var q Fifo[*int]
+	ps := make([]*int, 8)
+	for i := range ps {
+		ps[i] = new(int)
+		q.Unshift(ps[i])
+	}
+	q.Shift()
+	for _, i := range []int{1, 7, 4, 2, 6} {
+		p := ps[i]
+		if !q.DeleteOne(func(x *int) bool { return x == p }) {
+			t.Fatalf("DeleteOne(ps[%d]) = false, want true", i)
+		}
+		checkReleased(t, &q)
+	}
+}
+
 func TestFifoFront(t *testing.T) {
 	var q Fifo[int]
 
