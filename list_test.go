@@ -147,6 +147,32 @@ func TestListSkipsCanceled(t *testing.T) {
 	})
 }
 
+func TestListCanceledInLine(t *testing.T) {
+	// A canceled Ticket behind a live one keeps its MaxWaiters place until
+	// the List notices, here when its own Value returns.
+	synctest.Test(t, func(t *testing.T) {
+		l := &List[int]{MaxWaiters: 2}
+		live := l.Take(t.Context())
+		ctx, cancel := context.WithCancelCause(t.Context())
+		canceled := l.Take(ctx)
+		cancel(errStop)
+		if _, err := l.Take(t.Context()).Value(); !errors.Is(err, ErrMaxWaiters) {
+			t.Errorf("Take behind an unnoticed cancel: Value() = %v, want ErrMaxWaiters", err)
+		}
+		if _, err := canceled.Value(); err != errStop {
+			t.Errorf("canceled.Value() = %v, want errStop", err)
+		}
+		next := l.Take(t.Context())
+		l.Add(1)
+		l.Add(2)
+		if v, err := next.Value(); v != 2 || err != nil {
+			t.Errorf("Take after the cancel was noticed: Value() = %d, %v, want 2, nil", v, err)
+		}
+		live.Done()
+		next.Done()
+	})
+}
+
 func TestListSkipsCanceledValue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var l List[int]
@@ -457,6 +483,21 @@ func BenchmarkList(b *testing.B) {
 				}
 			})
 		}
+	}
+
+	// A full line of n live waiters, where each op is a Take turned away.
+	for _, n := range []int{10, 10000} {
+		b.Run(fmt.Sprintf("full/line=%d", n), func(b *testing.B) {
+			l := &List[int]{MaxWaiters: n}
+			for range n {
+				l.Take(b.Context())
+			}
+			for b.Loop() {
+				if _, err := l.Take(b.Context()).Value(); err != ErrMaxWaiters {
+					b.Fatal("Value:", err)
+				}
+			}
+		})
 	}
 
 	b.Run("ready", func(b *testing.B) {

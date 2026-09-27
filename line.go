@@ -79,10 +79,13 @@ func (l *line[V]) ticket(list *List[V], ctx context.Context, v V) Ticket[V] {
 
 // join adds a waiter for ctx, holding v, to the end of the line and returns
 // its Ticket. If max is positive and the line holds max waiters even after
-// removing those whose ctx is done, join returns ErrMaxWaiters instead.
+// removing those at its front whose ctx is done, join returns ErrMaxWaiters
+// instead. It looks only at the front, where a timeout ends the oldest
+// waiter first, so that turning a caller away doesn't cost a scan of the
+// line when the List is busiest.
 func (l *line[V]) join(list *List[V], ctx context.Context, v V, max int) (Ticket[V], error) {
 	if max > 0 && l.q.Len() >= max {
-		l.prune()
+		l.front()
 		if l.q.Len() >= max {
 			return Ticket[V]{}, ErrMaxWaiters
 		}
@@ -120,17 +123,6 @@ func (l *line[V]) admit(v V) {
 // leave removes w from the line and reports whether it was there.
 func (l *line[V]) leave(w *waiter[V]) bool {
 	return l.q.DeleteOne(func(q *waiter[V]) bool { return q == w })
-}
-
-// prune fails every waiter whose ctx is done.
-func (l *line[V]) prune() {
-	l.q.DeleteFunc(func(w *waiter[V]) bool {
-		if w.ctx.Err() == nil {
-			return false
-		}
-		w.fail(context.Cause(w.ctx))
-		return true
-	})
 }
 
 // close empties the line, failing each waiter with ErrClosed, or with the
