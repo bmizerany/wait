@@ -29,10 +29,10 @@ func fill(k int, mem []float32) {
 // reserve starts a caller for n elements and waits until it has reserved
 // or stepped aside, so callers arrive in the order reserve is called. The
 // Handle arrives on the returned channel.
-func reserve(t *testing.T, b *batch.Batcher[float32], n int) <-chan batch.Handle[float32] {
-	c := make(chan batch.Handle[float32], 1)
+func reserve(t *testing.T, b *batch.Batcher[float32, float32], n int) <-chan batch.Handle[float32, float32] {
+	c := make(chan batch.Handle[float32, float32], 1)
 	go func() {
-		h, err := b.Reserve(t.Context(), in(n))
+		h, err := b.Reserve(t.Context(), in(n), n)
 		if err != nil {
 			t.Errorf("Reserve(%d) = %v, want nil", n, err)
 		}
@@ -43,7 +43,7 @@ func reserve(t *testing.T, b *batch.Batcher[float32], n int) <-chan batch.Handle
 }
 
 // wantHandles checks that the callers started by reserve got results want.
-func wantHandles(t *testing.T, c []<-chan batch.Handle[float32], want [][]float32) {
+func wantHandles(t *testing.T, c []<-chan batch.Handle[float32, float32], want [][]float32) {
 	t.Helper()
 	for i, want := range want {
 		mem, err := (<-c[i]).Wait(t.Context())
@@ -68,23 +68,23 @@ type batchInfo struct {
 	clean bool
 }
 
-func startOwner(ctx context.Context, b *batch.Batcher[float32]) *owner {
+func startOwner[In any](ctx context.Context, b *batch.Batcher[In, float32]) *owner {
 	return startOwners(ctx, b, 1)
 }
 
 // startOwners is startOwner with n goroutines ranging over Batches, all
 // sending on the same channels. Batch numbers count per goroutine.
-func startOwners(ctx context.Context, b *batch.Batcher[float32], n int) *owner {
+func startOwners[In any](ctx context.Context, b *batch.Batcher[In, float32], n int) *owner {
 	o := &owner{yielded: make(chan batchInfo), step: make(chan struct{}), done: make(chan struct{})}
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
 			k := 0
-			for mem := range b.Batches(ctx) {
+			for bt := range b.Batches(ctx) {
 				k++
-				clean := !slices.ContainsFunc(mem, func(f float32) bool { return f != 0 })
-				o.yielded <- batchInfo{len(mem), clean}
-				fill(k, mem)
+				clean := !slices.ContainsFunc(bt.Out, func(f float32) bool { return f != 0 })
+				o.yielded <- batchInfo{len(bt.Out), clean}
+				fill(k, bt.Out)
 				<-o.step
 			}
 		})
@@ -126,8 +126,8 @@ func (o *owner) idle(t *testing.T) {
 
 func TestBatches(t *testing.T) { synctest.Test(t, testBatches) }
 func testBatches(t *testing.T) {
-	b := batch.New[float32](16, 4)
-	var hs [7]<-chan batch.Handle[float32]
+	b := batch.New[float32, float32](16, 16, 4)
+	var hs [7]<-chan batch.Handle[float32, float32]
 	for i, n := range []int{6, 8, 12, 2, 5, 3} {
 		hs[i] = reserve(t, b, n)
 	}
@@ -159,8 +159,8 @@ func testBatches(t *testing.T) {
 
 func TestAsideTwice(t *testing.T) { synctest.Test(t, testAsideTwice) }
 func testAsideTwice(t *testing.T) {
-	b := batch.New[float32](16, 4)
-	var hs [4]<-chan batch.Handle[float32]
+	b := batch.New[float32, float32](16, 16, 4)
+	var hs [4]<-chan batch.Handle[float32, float32]
 	hs[0] = reserve(t, b, 8)
 	hs[1] = reserve(t, b, 12) // steps aside
 	hs[2] = reserve(t, b, 9)  // steps aside, behind 12
@@ -188,7 +188,7 @@ func testSwap(t *testing.T) {
 	// With two buffers, one batch fills while the other is run and read.
 	// A full batch waits until the other buffer's callers are done with
 	// it, and so does every caller; then the two trade places.
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	o := startOwner(t.Context(), b)
 	h1 := <-reserve(t, b, 4)
 	o.run(t)
@@ -220,7 +220,7 @@ func testSwap(t *testing.T) {
 
 func TestDone(t *testing.T) { synctest.Test(t, testDone) }
 func testDone(t *testing.T) {
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	b.MaxDelay = time.Hour // only full batches run
 	o := startOwner(t.Context(), b)
 	h1 := <-reserve(t, b, 2)
@@ -266,7 +266,7 @@ func testDone(t *testing.T) {
 func TestMaxDelay(t *testing.T) { synctest.Test(t, testMaxDelay) }
 func testMaxDelay(t *testing.T) {
 	const d = 10 * time.Millisecond
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	b.MaxDelay = d
 	o := startOwner(t.Context(), b)
 
@@ -302,22 +302,79 @@ func testMaxDelay(t *testing.T) {
 	<-o.done
 }
 
+func TestFull(t *testing.T) { synctest.Test(t, testFull) }
+func testFull(t *testing.T) {
+	// A batch is full when its input or its output is, and a caller that
+	// doesn't fit in either steps aside. A batch with no input to fill
+	// waits for its output to.
+	b := batch.New[uint32, float32](4, 8, 3)
+	b.MaxDelay = time.Hour
+	o := startOwner(t.Context(), b)
+	h1, err := b.Reserve(t.Context(), make([]uint32, 4), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := o.run(t).size; n != 1 {
+		t.Errorf("batch with its input full = %d outputs, want 1", n)
+	}
+	h2, err := b.Reserve(t.Context(), make([]uint32, 3), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := make(chan batch.Handle[uint32, float32], 1)
+	go func() {
+		h, err := b.Reserve(t.Context(), make([]uint32, 2), 1) // output fits, input doesn't
+		if err != nil {
+			t.Error(err)
+		}
+		c <- h
+	}()
+	if n := o.run(t).size; n != 1 {
+		t.Errorf("batch stepped aside from = %d outputs, want 1", n)
+	}
+	h1.Done()
+	h2.Done()
+	(<-c).Done()
+	b.Close()
+	<-o.done
+
+	b = batch.New[uint32, float32](0, 4, 2)
+	b.MaxDelay = time.Hour
+	o = startOwner(t.Context(), b)
+	h1, err = b.Reserve(t.Context(), nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	o.idle(t)
+	h2, err = b.Reserve(t.Context(), nil, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := o.run(t).size; n != 4 {
+		t.Errorf("batch with its output full = %d outputs, want 4", n)
+	}
+	h1.Done()
+	h2.Done()
+	b.Close()
+	<-o.done
+}
+
 func TestOwners(t *testing.T) { synctest.Test(t, testOwners) }
 func testOwners(t *testing.T) {
 	// Several owners share the batches: each batch goes to one of them,
 	// and every caller gets its own elements of one batch.
-	b := batch.New[float32](8, 4)
+	b := batch.New[float32, float32](8, 8, 4)
 	var mu sync.Mutex
 	next := 0
 	var wg sync.WaitGroup
 	for range 3 {
 		wg.Go(func() {
-			for mem := range b.Batches(t.Context()) {
+			for bt := range b.Batches(t.Context()) {
 				mu.Lock()
 				next++
 				k := next
 				mu.Unlock()
-				fill(k, mem)
+				fill(k, bt.Out)
 			}
 		})
 	}
@@ -325,7 +382,7 @@ func testOwners(t *testing.T) {
 	for i := range 60 {
 		callers.Go(func() {
 			n := 1 + i%5
-			h, err := b.Reserve(t.Context(), in(n))
+			h, err := b.Reserve(t.Context(), in(n), n)
 			if err != nil {
 				t.Errorf("Reserve(%d) = %v", n, err)
 				return
@@ -355,7 +412,7 @@ func testOwnersWait(t *testing.T) {
 	// Two owners see batch 2 ready. One takes it; the other, next in line
 	// for the turn, must find batch 3 not yet ready and wait MaxDelay for
 	// it, not take it at once.
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	b.MaxDelay = time.Hour
 	o := startOwners(t.Context(), b, 2)
 	h1 := <-reserve(t, b, 4)
@@ -383,10 +440,10 @@ var errStop = errors.New("stop")
 
 func TestCancel(t *testing.T) { synctest.Test(t, testCancel) }
 func testCancel(t *testing.T) {
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	ctx, cancel := context.WithCancelCause(t.Context())
 	cancel(errStop)
-	if _, err := b.Reserve(ctx, in(4)); err != errStop {
+	if _, err := b.Reserve(ctx, in(4), 4); err != errStop {
 		t.Errorf("Reserve(4) with a done ctx = %v, want errStop", err)
 	}
 
@@ -407,13 +464,13 @@ func testCancel(t *testing.T) {
 
 func TestCancelAside(t *testing.T) { synctest.Test(t, testCancelAside) }
 func testCancelAside(t *testing.T) {
-	b := batch.New[float32](16, 4)
-	var hs [3]<-chan batch.Handle[float32]
+	b := batch.New[float32, float32](16, 16, 4)
+	var hs [3]<-chan batch.Handle[float32, float32]
 	hs[0] = reserve(t, b, 8)
 	ctx, cancel := context.WithCancel(t.Context())
 	errc := make(chan error, 1)
 	go func() {
-		_, err := b.Reserve(ctx, in(12)) // steps aside
+		_, err := b.Reserve(ctx, in(12), 12) // steps aside
 		errc <- err
 	}()
 	synctest.Wait()
@@ -441,8 +498,8 @@ func testCancelAside(t *testing.T) {
 
 func TestCancelWait(t *testing.T) { synctest.Test(t, testCancelWait) }
 func testCancelWait(t *testing.T) {
-	b := batch.New[float32](16, 2)
-	h, err := b.Reserve(t.Context(), in(4))
+	b := batch.New[float32, float32](16, 16, 2)
+	h, err := b.Reserve(t.Context(), in(4), 4)
 	if err != nil {
 		t.Fatalf("Reserve(4) = %v, want nil", err)
 	}
@@ -467,10 +524,10 @@ func testCancelWait(t *testing.T) {
 func TestBreak(t *testing.T) { synctest.Test(t, testBreak) }
 func testBreak(t *testing.T) {
 	// A loop body that breaks, or panics, still delivers its batch.
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	h := <-reserve(t, b, 4)
-	for mem := range b.Batches(t.Context()) {
-		fill(1, mem)
+	for bt := range b.Batches(t.Context()) {
+		fill(1, bt.Out)
 		break
 	}
 	if mem, err := h.Wait(t.Context()); err != nil || mem[0] != 100 {
@@ -485,8 +542,8 @@ func testBreak(t *testing.T) {
 				t.Error("loop body did not panic")
 			}
 		}()
-		for mem := range b.Batches(t.Context()) {
-			fill(2, mem)
+		for bt := range b.Batches(t.Context()) {
+			fill(2, bt.Out)
 			panic("gpu")
 		}
 	}()
@@ -502,14 +559,14 @@ func testHoldAndReserve(t *testing.T) {
 	// has run can wait on itself: with both buffers in use, the owner
 	// waits for that Handle's Done before it can open the batch the new
 	// reservation needs.
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	o := startOwner(t.Context(), b)
 	h1 := <-reserve(t, b, 4)
 	o.run(t)
 	h2 := <-reserve(t, b, 4) // fills the other buffer; the owner now waits
 	ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 	defer cancel()
-	if _, err := b.Reserve(ctx, in(1)); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := b.Reserve(ctx, in(1), 1); !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("Reserve(1) while holding h1 = %v, want to wait until its ctx is done", err)
 	}
 	h1.Done()
@@ -521,7 +578,7 @@ func testHoldAndReserve(t *testing.T) {
 
 func TestClose(t *testing.T) { synctest.Test(t, testClose) }
 func testClose(t *testing.T) {
-	b := batch.New[float32](16, 4)
+	b := batch.New[float32, float32](16, 16, 4)
 	h8 := reserve(t, b, 8)
 	h12 := reserve(t, b, 12) // steps aside
 	o := startOwner(t.Context(), b)
@@ -531,7 +588,7 @@ func testClose(t *testing.T) {
 	h4 := <-reserve(t, b, 4)
 	errc := make(chan error, 1)
 	go func() {
-		_, err := b.Reserve(t.Context(), in(8))
+		_, err := b.Reserve(t.Context(), in(8), 8)
 		errc <- err
 	}()
 	synctest.Wait()
@@ -541,66 +598,83 @@ func testClose(t *testing.T) {
 	if err := <-errc; !errors.Is(err, wait.ErrClosed) {
 		t.Errorf("Reserve(8) after Close = %v, want ErrClosed", err)
 	}
-	for _, h := range []batch.Handle[float32]{<-h12, h4} {
+	for _, h := range []batch.Handle[float32, float32]{<-h12, h4} {
 		if mem, err := h.Wait(t.Context()); !errors.Is(err, wait.ErrClosed) {
 			t.Errorf("Wait() on batch 2 after Close = %v, %v, want nil, ErrClosed", mem, err)
 		}
 	}
-	if _, err := b.Reserve(t.Context(), in(1)); !errors.Is(err, wait.ErrClosed) {
+	if _, err := b.Reserve(t.Context(), in(1), 1); !errors.Is(err, wait.ErrClosed) {
 		t.Errorf("Reserve(1) after Close = %v, want ErrClosed", err)
 	}
 
 	// The running batch still delivers, and then the loop ends.
 	o.step <- struct{}{}
 	<-o.done
-	wantHandles(t, []<-chan batch.Handle[float32]{h8}, [][]float32{{100, 101, 102, 103, 104, 105, 106, 107}})
+	wantHandles(t, []<-chan batch.Handle[float32, float32]{h8}, [][]float32{{100, 101, 102, 103, 104, 105, 106, 107}})
 }
 
 func TestReserveRange(t *testing.T) {
-	b := batch.New[float32](16, 2)
-	if _, err := b.Reserve(t.Context(), in(17)); !errors.Is(err, batch.ErrRange) {
-		t.Errorf("Reserve of 17 = %v, want ErrRange", err)
-	}
-	for _, input := range [][]float32{nil, {}} {
-		h, err := b.Reserve(t.Context(), input)
-		if err != nil {
-			t.Fatalf("Reserve(%v) = %v, want nil", input, err)
+	b := batch.New[uint32, float32](8, 4, 2)
+	for _, tt := range []struct{ nin, nout int }{
+		{9, 1}, // more input than a batch holds
+		{1, 5}, // more output than a batch holds
+		{1, 0}, // no output
+		{1, -1},
+	} {
+		if _, err := b.Reserve(t.Context(), make([]uint32, tt.nin), tt.nout); !errors.Is(err, batch.ErrRange) {
+			t.Errorf("Reserve(%d in, %d out) = %v, want ErrRange", tt.nin, tt.nout, err)
 		}
-		if mem, err := h.Wait(t.Context()); mem != nil || err != nil {
-			t.Errorf("Reserve(%v).Wait() = %v, %v, want nil, nil", input, mem, err)
-		}
-		h.Done()
 	}
+	h, err := b.Reserve(t.Context(), nil, 4) // no input is fine
+	if err != nil {
+		t.Fatalf("Reserve(nil, 4) = %v, want nil", err)
+	}
+	h.Done()
+	var zero batch.Handle[uint32, float32]
+	if out, err := zero.Wait(t.Context()); out != nil || err != nil {
+		t.Errorf("zero Handle's Wait() = %v, %v, want nil, nil", out, err)
+	}
+	zero.Done()
 }
 
 func TestInputs(t *testing.T) {
-	// The owner sees each caller's input in its slots, in arrival order,
-	// replaces it with results, and never sees an earlier batch's data.
-	b := batch.New[float32](4, 2)
+	// Callers bring token IDs and want floats back, in their own amounts.
+	// The owner finds each caller's input and output by the offsets, and
+	// no batch sees an earlier batch's data.
+	b := batch.New[uint32, float32](8, 8, 2)
 	ctx := context.Background()
 	for round := range 3 {
-		x := []float32{1, 2}
-		h1, err := b.Reserve(ctx, x)
+		x := []uint32{1, 2, 3}
+		h1, err := b.Reserve(ctx, x, 2)
 		if err != nil {
 			t.Fatal(err)
 		}
 		x[0] = 99 // Reserve copied x, and doesn't keep it
-		h2, err := b.Reserve(ctx, []float32{3})
+		h2, err := b.Reserve(ctx, []uint32{10}, 3)
 		if err != nil {
 			t.Fatal(err)
 		}
-		mem := runOne(ctx, b, func(mem []float32) {
-			for i := range mem {
-				mem[i] *= 10
+		bt := runOne(ctx, b, func(bt batch.Batch[uint32, float32]) {
+			for i := range len(bt.InOffsets) - 1 {
+				var sum uint32
+				for _, v := range bt.In[bt.InOffsets[i]:bt.InOffsets[i+1]] {
+					sum += v
+				}
+				out := bt.Out[bt.OutOffsets[i]:bt.OutOffsets[i+1]]
+				for j := range out {
+					out[j] += float32(sum) // += shows Out started zeroed
+				}
 			}
 		})
-		if want := []float32{10, 20, 30}; !slices.Equal(mem, want) {
-			t.Errorf("round %d: batch = %v, want %v", round, mem, want)
+		if !slices.Equal(bt.In, []uint32{1, 2, 3, 10}) ||
+			!slices.Equal(bt.InOffsets, []int{0, 3, 4}) ||
+			!slices.Equal(bt.OutOffsets, []int{0, 2, 5}) {
+			t.Errorf("round %d: batch = %+v, want In [1 2 3 10], InOffsets [0 3 4], OutOffsets [0 2 5]", round, bt)
 		}
 		r1, _ := h1.Wait(ctx)
 		r2, _ := h2.Wait(ctx)
-		if !slices.Equal(r1, []float32{10, 20}) || !slices.Equal(r2, []float32{30}) {
-			t.Errorf("round %d: results = %v, %v, want [10 20], [30]", round, r1, r2)
+		if !slices.Equal(r1, []float32{6, 6}) || !slices.Equal(r2, []float32{10, 10, 10}) {
+			t.Errorf("round %d: results = %v, %v, want [6 6], [10 10 10]", round, r1, r2)
 		}
 		h1.Done()
 		h2.Done()
@@ -608,17 +682,17 @@ func TestInputs(t *testing.T) {
 }
 
 func TestHandle(t *testing.T) {
-	b := batch.New[float32](4, 2)
+	b := batch.New[float32, float32](4, 4, 2)
 	ctx := context.Background()
-	h1, err := b.Reserve(ctx, in(2))
+	h1, err := b.Reserve(ctx, in(2), 2)
 	if err != nil {
 		t.Fatalf("Reserve(2) = %v, want nil", err)
 	}
-	h2, err := b.Reserve(ctx, in(2))
+	h2, err := b.Reserve(ctx, in(2), 2)
 	if err != nil {
 		t.Fatalf("Reserve(2) = %v, want nil", err)
 	}
-	mem := runOne(ctx, b, func([]float32) {})
+	mem := runOne(ctx, b, func(batch.Batch[float32, float32]) {}).Out
 	m1, err1 := h1.Wait(ctx)
 	m2, err2 := h2.Wait(ctx)
 	if err1 != nil || err2 != nil || &m1[0] != &mem[0] || &m2[0] != &mem[2] {
@@ -629,31 +703,37 @@ func TestHandle(t *testing.T) {
 	}
 }
 
-// runOne runs f on b's next batch and returns the batch's elements.
-func runOne(ctx context.Context, b *batch.Batcher[float32], f func([]float32)) []float32 {
-	for mem := range b.Batches(ctx) {
-		f(mem)
-		return mem
+// runOne runs f on b's next batch and returns the batch.
+func runOne[In, Out any](ctx context.Context, b *batch.Batcher[In, Out], f func(batch.Batch[In, Out])) batch.Batch[In, Out] {
+	for bt := range b.Batches(ctx) {
+		f(bt)
+		return bt
 	}
-	return nil
+	return batch.Batch[In, Out]{}
 }
 
 func TestNewPanic(t *testing.T) {
-	for _, tt := range []struct{ size, buffers int }{{0, 2}, {-1, 2}, {1, 1}, {1, 0}} {
+	for _, tt := range []struct{ in, out, buffers int }{
+		{-1, 1, 2},
+		{1, 0, 2},
+		{1, -1, 2},
+		{1, 1, 1},
+		{1, 1, 0},
+	} {
 		func() {
 			defer func() {
 				if recover() == nil {
-					t.Errorf("New(%d, %d) did not panic", tt.size, tt.buffers)
+					t.Errorf("New(%d, %d, %d) did not panic", tt.in, tt.out, tt.buffers)
 				}
 			}()
-			batch.New[float32](tt.size, tt.buffers)
+			batch.New[uint32, float32](tt.in, tt.out, tt.buffers)
 		}()
 	}
 }
 
 func TestAllocs(t *testing.T) {
 	ctx := context.Background()
-	b := batch.New[float32](1024, 2)
+	b := batch.New[float32, float32](1024, 1024, 2)
 	go func() {
 		for range b.Batches(ctx) {
 		}
@@ -661,7 +741,7 @@ func TestAllocs(t *testing.T) {
 	defer b.Close()
 	x := in(1)
 	n := testing.AllocsPerRun(100, func() {
-		h, err := b.Reserve(ctx, x)
+		h, err := b.Reserve(ctx, x, 1)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -693,7 +773,7 @@ func BenchmarkReserve(b *testing.B) {
 		name := fmt.Sprintf("size=%d/n=%d/owners=%d/delay=%v", bc.size, bc.n, bc.owners, bc.delay)
 		b.Run(name, func(b *testing.B) {
 			ctx := context.Background()
-			bt := batch.New[float32](bc.size, bc.owners+1)
+			bt := batch.New[float32, float32](bc.size, bc.size, bc.owners+1)
 			bt.MaxDelay = bc.delay
 			var batches atomic.Int64
 			var owners sync.WaitGroup
@@ -708,7 +788,7 @@ func BenchmarkReserve(b *testing.B) {
 			b.RunParallel(func(pb *testing.PB) {
 				x := in(bc.n)
 				for pb.Next() {
-					h, err := bt.Reserve(ctx, x)
+					h, err := bt.Reserve(ctx, x, bc.n)
 					if err != nil {
 						b.Error(err)
 						return
