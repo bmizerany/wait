@@ -31,6 +31,7 @@ func TestListChaos(t *testing.T) {
 					if v, ok := chaos(t, &l, r, len(kept[i]) == 0); ok {
 						kept[i] = append(kept[i], v)
 					}
+					checkIdle(t, &l)
 				}
 			})
 		}
@@ -59,6 +60,17 @@ func TestListChaos(t *testing.T) {
 		if n := l.waiters.q.Len(); n != 0 {
 			t.Errorf("seed %d: %d waiters left in line after Close", seed, n)
 		}
+	}
+}
+
+// checkIdle fails t if l has an item ready while a Ticket waits in line,
+// which would let TryTake take an item a waiter is owed.
+func checkIdle(t *testing.T, l *List[int]) {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.ready.Len() > 0 && l.waiters.q.Len() > 0 {
+		t.Errorf("%d items ready while %d Tickets wait in line", l.ready.Len(), l.waiters.q.Len())
 	}
 }
 

@@ -110,7 +110,9 @@ func (l *List[T]) Take(ctx context.Context) Ticket[T] {
 
 // TryTake returns a Ticket holding the most recently used ready item, and
 // true, or the zero Ticket and false if no item is ready. Unlike Take, it
-// never joins the line.
+// never joins the line. A List never leaves an item ready while a Ticket
+// waits in line, so an item TryTake finds is owed to no one: TryTake
+// cannot cut the line.
 func (l *List[T]) TryTake() (Ticket[T], bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

@@ -338,6 +338,29 @@ func TestTryTake(t *testing.T) {
 	})
 }
 
+func TestTryTakeOwed(t *testing.T) {
+	// A List never leaves an item ready while a Ticket waits in line, so
+	// TryTake never takes an item a waiter is owed.
+	synctest.Test(t, func(t *testing.T) {
+		var l List[int]
+		l.Add(1)
+		first := l.Take(t.Context()) // takes the ready item; nothing waits
+		checkIdle(t, &l)
+		holder := held(t, first)
+		waiter := l.Take(t.Context())
+		holder.Done() // 1 is owed to waiter
+		checkIdle(t, &l)
+		if tk, ok := l.TryTake(); ok {
+			v, _ := tk.Value()
+			t.Errorf("TryTake() = %d, true while a Ticket waited for it, want false", v)
+		}
+		if v, err := waiter.Value(); v != 1 || err != nil {
+			t.Errorf("waiter.Value() = %d, %v, want 1, nil", v, err)
+		}
+		waiter.Done()
+	})
+}
+
 func TestTicketDoneAdmitted(t *testing.T) {
 	// A Ticket done after admission but before Value gives its item
 	// back: to the Ticket behind it, else to the ready items.
