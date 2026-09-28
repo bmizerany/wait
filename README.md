@@ -38,9 +38,9 @@ and again when it breaks, so whoever takes it next usually finds it connected.
 The package's redial example shows how.
 
 A `List` holding a single item is a fair lock: whoever holds the item has
-the turn. The package's VM example uses two such lists to share a host's CPUs
-and memory among VMs of different sizes, strictly in arrival order, in about
-thirty lines.
+the turn. The package's demand example uses two such lists to share a link's
+connections and bandwidth among downloads of different sizes, strictly in
+arrival order, in one short function.
 
 Unlike a buffered channel, a list hands out the most recently returned item
 instead of the one idle longest, holds your place in line without blocking so

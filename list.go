@@ -19,8 +19,9 @@
 // [Ticket.Leave] before the deferred Done.
 //
 // A List of one item is a fair lock: holding the item is your turn. The
-// package's VM example shares a host's CPUs and memory among VMs with two
-// such Lists, serving callers strictly in arrival order.
+// package's demand example shares a link's connections and bandwidth
+// among downloads with two such Lists, serving callers strictly in
+// arrival order.
 //
 // Unlike a buffered channel, a List hands out the most recently returned
 // item rather than the one idle longest, holds a caller's place in line
