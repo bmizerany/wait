@@ -7,6 +7,10 @@ import (
 )
 
 // A Fifo is a first-in, first-out queue. Its zero value is ready to use.
+//
+// Front, Shift, and Len take O(1) time, and Unshift takes amortized O(1)
+// time. DeleteOne takes time proportional to the distance between the
+// value it removes and the nearer end of the queue, so O(n) at worst.
 type Fifo[E any] struct {
 	// The queue is a[head:]. Shift advances head rather than moving the
 	// rest down, and a[:head] is zeroed so that it holds on to nothing.
@@ -56,9 +60,9 @@ func (q *Fifo[E]) Shift() (v E, ok bool) {
 }
 
 // DeleteOne removes a value for which f returns true, if there is one,
-// and reports whether it did. It looks from both ends of the queue at
-// once, so it is quickest for values near either end. If f returns true
-// for more than one value, which one DeleteOne removes is unspecified.
+// and reports whether it did. It checks values in pairs, one from each
+// end, working toward the middle. If f returns true for more than one
+// value, which one DeleteOne removes is unspecified.
 func (q *Fifo[E]) DeleteOne(f func(E) bool) bool {
 	for i, j := q.head, len(q.a)-1; i <= j; i, j = i+1, j-1 {
 		if f(q.a[i]) {
@@ -101,6 +105,8 @@ func (q *Fifo[E]) Values() iter.Seq[E] {
 }
 
 // A Lifo is a last-in, first-out stack. Its zero value is ready to use.
+//
+// Pop and Len take O(1) time, and Push takes amortized O(1) time.
 type Lifo[E any] struct {
 	a []E
 }
@@ -124,6 +130,6 @@ func (q *Lifo[E]) Pop() (v E, ok bool) {
 }
 
 // Len returns the number of values in the stack.
-func (q *Lifo[T]) Len() int {
+func (q *Lifo[E]) Len() int {
 	return len(q.a)
 }
