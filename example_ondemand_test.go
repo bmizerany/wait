@@ -10,17 +10,20 @@ import (
 	"blake.io/wait"
 )
 
-// Copies of a model are loaded on demand, up to max. A caller that finds
-// no copy idle starts loading one, if there is room, and waits in line.
-// Each copy, new or given back, goes to whoever has waited longest.
+// This example loads copies of a model only when callers need them, up to
+// max. A caller that finds no idle copy starts a load if there is room for
+// another copy, then waits in line. Each copy, whether newly loaded or
+// given back, goes to the caller that has waited longest.
 //
-// Looking first is fair: TryTake cannot take a copy a waiter is owed. At
-// worst, a copy given back between TryTake and Take means one load more
-// than needed, never more than max.
+// Calling TryTake before Take is fair, because TryTake cannot take a copy
+// that a waiting caller is owed. If a copy is given back between TryTake
+// and Take, the caller may start a load it didn't need, but there are
+// still at most max copies.
 //
-// Loading can fail for reasons outside the process, like other processes
-// filling the GPU's memory. A failed load tries again instead of giving up
-// its room, since callers in line are counting on it.
+// A load can fail for reasons the process doesn't control, such as other
+// processes filling the GPU's memory. The goroutine that started the load
+// tries again rather than giving up its room, because callers already in
+// line are waiting for that copy.
 func Example_loadOnDemand() {
 	const max = 2
 	ctx := context.Background()
@@ -36,7 +39,7 @@ func Example_loadOnDemand() {
 		return nil
 	}
 
-	var misses atomic.Int64 // the first max each load a copy
+	var misses atomic.Int64 // each of the first max misses starts a load
 	get := func() wait.Ticket[string] {
 		if t, ok := copies.TryTake(); ok {
 			return t // an idle copy
