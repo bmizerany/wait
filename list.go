@@ -73,7 +73,8 @@ type List[Item any] struct {
 	// that would exceed it returns a Ticket whose Value reports
 	// ErrMaxWaiters. A Ticket whose ctx is done stops counting once the
 	// List notices: when its Value returns, or when it reaches the front
-	// of the line. Zero means no limit.
+	// of the line. Zero means no limit. Set MaxWaiters before using the List;
+	// do not change it afterward.
 	MaxWaiters int
 
 	mu      sync.Mutex       // guards the fields below
