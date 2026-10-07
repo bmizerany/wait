@@ -1,6 +1,7 @@
 # wait
 
-[![Go Reference](https://pkg.go.dev/badge/blake.io/wait.svg)](https://pkg.go.dev/blake.io/wait)
+[![CI](https://github.com/bmizerany/wait/actions/workflows/ci.yml/badge.svg)](https://github.com/bmizerany/wait/actions/workflows/ci.yml)
+[![GoDoc](https://godoc.org/blake.io/wait?status.svg)](https://godoc.org/blake.io/wait)
 
 Package `wait` controls access to scarce things like connections, device
 handles, worker capacity, and API quota, when you need both a hard limit and
