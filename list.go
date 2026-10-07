@@ -71,10 +71,10 @@ var (
 type List[Item any] struct {
 	// MaxWaiters is the maximum number of Tickets waiting in line. A Take
 	// that would exceed it returns a Ticket whose Value reports
-	// ErrMaxWaiters. A Ticket whose ctx is done stops counting once the
-	// List notices: when its Value returns, or when it reaches the front
-	// of the line. Zero means no limit. Set MaxWaiters before using the List;
-	// do not change it afterward.
+	// ErrMaxWaiters. A Ticket whose ctx is done stops counting when its
+	// Value returns or it reaches the front of the line. Zero means no
+	// limit. Set MaxWaiters before using the List, and do not change it
+	// afterward.
 	MaxWaiters int
 
 	mu      sync.Mutex       // guards the fields below
